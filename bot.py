@@ -387,13 +387,17 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.wfile.write(b"Not found")
     
     def _get_file_data(self, file_code):
-        import asyncio
+    import asyncio
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
             return loop.run_until_complete(db.get_file(file_code))
-        except:
-            return None
+        finally:
+            loop.close()
+    except Exception as e:
+        logger.error(f"_get_file_data error for {file_code}: {e}")
+        return None
     
     def _increment_views(self, file_code):
         import asyncio
