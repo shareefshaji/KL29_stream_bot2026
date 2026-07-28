@@ -52,7 +52,8 @@ pyro_app = PyrogramClient(
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    workers=4
+    workers=4,
+    in_memory=True  # Use in-memory session for better performance
 )
 
 # ============================================================
@@ -196,7 +197,7 @@ def get_file_icon(file_type):
     return icons.get(file_type, "📎")
 
 # ============================================================
-# HEALTH SERVER - WITH PYROGRAM FILE HANDLING
+# HEALTH SERVER - FIXED WITH PROPER PYROGRAM DOWNLOAD
 # ============================================================
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -355,31 +356,33 @@ class HealthHandler(BaseHTTPRequestHandler):
             if file_data:
                 increment_downloads(file_code)
                 
-                # Download file using Pyrogram and serve it
                 try:
                     file_id = file_data['file_id']
                     file_name = file_data['file_name']
+                    mime_type = file_data['mime_type']
                     
                     # Create downloads directory
                     os.makedirs("downloads", exist_ok=True)
                     
-                    # Download using Pyrogram
+                    # FIXED: Use correct download_media parameters
                     file_path = f"downloads/{file_code}_{file_name}"
                     
-                    # Use pyrogram to download
-                    import asyncio
+                    # Run async download in sync context
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
                     
-                    # Download the file
+                    # FIXED: download_media uses file_name parameter, not file_path
                     downloaded = loop.run_until_complete(
-                        pyro_app.download_media(file_id, file_path=file_path)
+                        pyro_app.download_media(
+                            message=file_id,
+                            file_name=file_path  # This is the correct parameter name
+                        )
                     )
                     
                     if downloaded and os.path.exists(downloaded):
-                        # Serve the file
+                        # Serve the file for download
                         self.send_response(200)
-                        self.send_header('Content-Type', file_data['mime_type'])
+                        self.send_header('Content-Type', mime_type or 'application/octet-stream')
                         self.send_header('Content-Disposition', f'attachment; filename="{file_name}"')
                         self.send_header('Content-Length', str(os.path.getsize(downloaded)))
                         self.end_headers()
@@ -388,7 +391,10 @@ class HealthHandler(BaseHTTPRequestHandler):
                             self.wfile.write(f.read())
                         
                         # Clean up after sending
-                        os.remove(downloaded)
+                        try:
+                            os.remove(downloaded)
+                        except:
+                            pass
                     else:
                         self.send_response(404)
                         self.end_headers()
@@ -419,21 +425,24 @@ class HealthHandler(BaseHTTPRequestHandler):
                     # Create downloads directory
                     os.makedirs("downloads", exist_ok=True)
                     
-                    # Download using Pyrogram
+                    # FIXED: Use correct download_media parameters
                     file_path = f"downloads/stream_{file_code}_{file_name}"
                     
-                    import asyncio
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
                     
+                    # FIXED: download_media uses file_name parameter
                     downloaded = loop.run_until_complete(
-                        pyro_app.download_media(file_id, file_path=file_path)
+                        pyro_app.download_media(
+                            message=file_id,
+                            file_name=file_path  # This is the correct parameter name
+                        )
                     )
                     
                     if downloaded and os.path.exists(downloaded):
                         # Stream the file
                         self.send_response(200)
-                        self.send_header('Content-Type', mime_type)
+                        self.send_header('Content-Type', mime_type or 'video/mp4')
                         self.send_header('Content-Disposition', f'inline; filename="{file_name}"')
                         self.send_header('Content-Length', str(os.path.getsize(downloaded)))
                         self.send_header('Accept-Ranges', 'bytes')
@@ -443,7 +452,10 @@ class HealthHandler(BaseHTTPRequestHandler):
                             self.wfile.write(f.read())
                         
                         # Clean up
-                        os.remove(downloaded)
+                        try:
+                            os.remove(downloaded)
+                        except:
+                            pass
                     else:
                         self.send_response(404)
                         self.end_headers()
