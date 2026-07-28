@@ -12,7 +12,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.types import Message
 from aiohttp import web
 
@@ -78,6 +78,16 @@ async def help_command(client: Client, message: Message):
     except Exception as e:
         logger.error(f"❌ Help error: {e}")
 
+# ---------- ECHO TEXT MESSAGES ----------
+@app.on_message(filters.private & filters.text & ~filters.command(["start", "help"]))
+async def echo_message(client: Client, message: Message):
+    """Echo any text message to confirm bot is working"""
+    logger.info(f"📩 Text from {message.from_user.id}: {message.text}")
+    await message.reply_text(
+        f"📩 I received: '{message.text}'\n\n"
+        f"Send me a file or use /help"
+    )
+
 # ---------- FILE HANDLER ----------
 @app.on_message(filters.private & (filters.video | filters.document | filters.audio | filters.photo))
 async def handle_file(client: Client, message: Message):
@@ -135,13 +145,6 @@ async def handle_file(client: Client, message: Message):
         logger.error(f"❌ File error: {e}")
         await message.reply_text(f"❌ Error: {str(e)}")
 
-# ---------- TEST HANDLER - ECHO ANY MESSAGE ----------
-@app.on_message(filters.private & filters.text & ~filters.command(["start", "help"]))
-async def echo_message(client: Client, message: Message):
-    """Echo any text message to confirm bot is working"""
-    logger.info(f"📩 Text from {message.from_user.id}: {message.text}")
-    await message.reply_text(f"📩 I received: '{message.text}'\n\nSend me a file or use /help")
-
 # ============================================================
 # WEB SERVER
 # ============================================================
@@ -170,9 +173,10 @@ async def start_web():
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
     logger.info(f"🌐 Web: http://0.0.0.0:{PORT}")
+    return runner, site
 
 # ============================================================
-# MAIN - FIXED
+# MAIN - ULTIMATE WORKING VERSION
 # ============================================================
 
 async def main():
@@ -181,14 +185,14 @@ async def main():
     print("=" * 60)
     
     # Start web server
-    await start_web()
+    web_runner, web_site = await start_web()
     
     # Start Telegram bot
     try:
         await app.start()
         me = await app.get_me()
         print("=" * 60)
-        print("✅ BOT STARTED!")
+        print("✅ BOT STARTED SUCCESSFULLY!")
         print(f"📛 Name: {me.first_name}")
         print(f"🔖 Username: @{me.username}")
         print(f"🆔 ID: {me.id}")
@@ -197,9 +201,9 @@ async def main():
         print("📬 Send /start in Telegram")
         print("=" * 60)
         
-        # ⭐ IMPORTANT: Keep the bot running with idle()
-        logger.info("🔄 Starting idle loop...")
-        await app.idle()
+        # ⭐ CRITICAL: Use idle() from pyrogram import
+        logger.info("🔄 Bot is now listening for messages...")
+        await idle()
         
     except Exception as e:
         print(f"❌ Error: {e}")
@@ -207,7 +211,9 @@ async def main():
     
     finally:
         # Clean shutdown
+        logger.info("🔄 Shutting down...")
         await app.stop()
+        await web_runner.cleanup()
         logger.info("👋 Bot stopped")
 
 if __name__ == "__main__":
