@@ -153,7 +153,7 @@ def add_user(user):
     except Exception as e:
         logger.error(f"Add user error: {e}")
 
-def save_file(file_code, chat_id, message_id, file_unique_id, file_name,
+def save_file(file_code, chat_id, message_id, file_id, file_unique_id, file_name,
               file_size, mime_type, file_type, user_id):
     if files_col is None:
         return True
@@ -162,6 +162,7 @@ def save_file(file_code, chat_id, message_id, file_unique_id, file_name,
             "file_code": file_code,
             "chat_id": chat_id,
             "message_id": message_id,
+            "file_id": file_id,
             "file_unique_id": file_unique_id,
             "file_name": file_name,
             "file_size": file_size,
@@ -364,6 +365,18 @@ class HealthHandler(BaseHTTPRequestHandler):
         file_name = file_data['file_name']
         mime_type = file_data.get('mime_type') or 'application/octet-stream'
 
+        # Legacy records (saved before this fix) only have a bare file_id,
+        # no chat_id/message_id. They can't use stream_media, so fall back
+        # to the old download-then-serve path for those specific files only.
+        if not file_data.get('chat_id') or not file_data.get('message_id'):
+            if file_data.get('file_id'):
+                self._serve_legacy(file_data, inline)
+            else:
+                self.send_response(410)
+                self.end_headers()
+                self.wfile.write(b"This link was saved in an old format and can no longer be served. Please re-upload the file.")
+            return
+
         try:
             message = run_async(
                 pyro_app.get_messages(file_data['chat_id'], file_data['message_id'])
@@ -409,6 +422,58 @@ class HealthHandler(BaseHTTPRequestHandler):
                     break
         except Exception as e:
             logger.error(f"Serve error: {e}")
+
+    def _serve_legacy(self, file_data, inline: bool):
+        """Fallback for records saved before this fix (file_id only, no
+        chat_id/message_id). Downloads the file once via download_media
+        and serves it whole. No Range/seeking support for these files —
+        re-upload to get full streaming support."""
+        file_name = file_data['file_name']
+        mime_type = file_data.get('mime_type') or 'application/octet-stream'
+        downloaded = None
+        try:
+            os.makedirs("downloads", exist_ok=True)
+            file_path = f"downloads/{file_data['file_code']}_{file_name}"
+            downloaded = run_async(
+                pyro_app.download_media(file_data['file_id'], file_name=file_path),
+                timeout=300
+            )
+            if not downloaded or not os.path.exists(downloaded):
+                self.send_response(404)
+                self.end_headers()
+                self.wfile.write(b"File not available")
+                return
+
+            self.send_response(200)
+            self.send_header('Content-Type', mime_type)
+            disposition = 'inline' if inline else 'attachment'
+            self.send_header('Content-Disposition', f'{disposition}; filename="{file_name}"')
+            self.send_header('Content-Length', str(os.path.getsize(downloaded)))
+            self.end_headers()
+
+            with open(downloaded, 'rb') as f:
+                while True:
+                    chunk = f.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    try:
+                        self.wfile.write(chunk)
+                    except (BrokenPipeError, ConnectionResetError):
+                        break
+        except Exception as e:
+            logger.error(f"Legacy serve error: {e}")
+            try:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(f"Error: {str(e)}".encode('utf-8'))
+            except Exception:
+                pass
+        finally:
+            if downloaded and os.path.exists(downloaded):
+                try:
+                    os.remove(downloaded)
+                except Exception:
+                    pass
 
     def log_message(self, format, *args):
         pass
@@ -502,7 +567,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         save_file(
             file_code, update.effective_chat.id, update.message.message_id,
-            document.file_unique_id, file_name, document.file_size,
+            document.file_id, document.file_unique_id, file_name, document.file_size,
             mime_type, file_type, user.id
         )
 
@@ -539,7 +604,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         save_file(
             file_code, update.effective_chat.id, update.message.message_id,
-            video.file_unique_id, file_name, video.file_size,
+            video.file_id, video.file_unique_id, file_name, video.file_size,
             video.mime_type or "video/mp4", "video", user.id
         )
 
@@ -574,7 +639,7 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         save_file(
             file_code, update.effective_chat.id, update.message.message_id,
-            audio.file_unique_id, file_name, audio.file_size,
+            audio.file_id, audio.file_unique_id, file_name, audio.file_size,
             audio.mime_type or "audio/mpeg", "audio", user.id
         )
 
@@ -608,7 +673,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         save_file(
             file_code, update.effective_chat.id, update.message.message_id,
-            photo.file_unique_id, file_name, photo.file_size,
+            photo.file_id, photo.file_unique_id, file_name, photo.file_size,
             "image/jpeg", "photo", user.id
         )
 
