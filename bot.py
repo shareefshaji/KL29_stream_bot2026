@@ -47,7 +47,7 @@ class Database:
         self.db = None
         self.users = None
         self.files = None
-        
+
         if MONGO_URI:
             try:
                 import pymongo
@@ -96,7 +96,8 @@ class Database:
 
     async def save_file(self, file_code, file_id, unique_id, file_name, file_size, mime_type, file_type):
         if self.files is None:
-            return True
+            logger.error("❌ save_file called but self.files is None (no DB connection)")
+            return False
         try:
             self.files.insert_one({
                 "file_code": file_code,
@@ -118,6 +119,7 @@ class Database:
 
     async def get_file(self, file_code):
         if self.files is None:
+            logger.error("❌ get_file called but self.files is None (no DB connection)")
             return None
         try:
             return self.files.find_one({"file_code": file_code})
@@ -184,7 +186,7 @@ def get_telegram_file_path(file_id):
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
         response = requests.get(url, timeout=10)
         data = response.json()
-        
+
         if data.get('ok') and data.get('result'):
             file_path = data['result'].get('file_path')
             if file_path:
@@ -213,15 +215,15 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"Bot is alive - Streaming Server")
-            
+
         elif self.path.startswith("/watch/"):
             file_code = self.path.split("/")[-1]
             file_data = self._get_file_data(file_code)
-            
+
             if file_data:
                 self._increment_views(file_code)
                 file_icon = get_file_icon(file_data.get('file_type', 'other'))
-                
+
                 html = f"""
                 <!DOCTYPE html>
                 <html>
@@ -356,18 +358,18 @@ class HealthHandler(BaseHTTPRequestHandler):
                 self.send_response(404)
                 self.end_headers()
                 self.wfile.write(b"File not found")
-                
+
         elif self.path.startswith("/download/"):
             file_code = self.path.split("/")[-1]
             file_data = self._get_file_data(file_code)
-            
+
             if file_data:
                 self._increment_downloads(file_code)
                 file_id = file_data['file_id']
-                
+
                 # Get the correct file URL from Telegram
                 file_url = get_telegram_file_url(file_id)
-                
+
                 if file_url:
                     # Redirect to the actual file
                     self.send_response(302)
@@ -385,37 +387,43 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
             self.wfile.write(b"Not found")
-    
+
     def _get_file_data(self, file_code):
-    import asyncio
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        import asyncio
         try:
-            return loop.run_until_complete(db.get_file(file_code))
-        finally:
-            loop.close()
-    except Exception as e:
-        logger.error(f"_get_file_data error for {file_code}: {e}")
-        return None
-    
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                return loop.run_until_complete(db.get_file(file_code))
+            finally:
+                loop.close()
+        except Exception as e:
+            logger.error(f"_get_file_data error for {file_code}: {e}")
+            return None
+
     def _increment_views(self, file_code):
         import asyncio
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            loop.run_until_complete(db.increment_views(file_code))
-        except:
-            pass
-    
+            try:
+                loop.run_until_complete(db.increment_views(file_code))
+            finally:
+                loop.close()
+        except Exception as e:
+            logger.error(f"_increment_views error for {file_code}: {e}")
+
     def _increment_downloads(self, file_code):
         import asyncio
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            loop.run_until_complete(db.increment_downloads(file_code))
-        except:
-            pass
+            try:
+                loop.run_until_complete(db.increment_downloads(file_code))
+            finally:
+                loop.close()
+        except Exception as e:
+            logger.error(f"_increment_downloads error for {file_code}: {e}")
 
     def log_message(self, format, *args):
         pass
@@ -433,7 +441,7 @@ def run_health_server():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await db.add_user(user)
-    
+
     await update.message.reply_text(
         f"👋 **Hello {user.first_name}!**\n\n"
         f"🎬 **Telegram Streaming Bot**\n\n"
@@ -476,7 +484,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         document = update.message.document
         file_name = document.file_name or "document"
-        
+
         mime_type = document.mime_type or "application/octet-stream"
         file_type = "document"
         if mime_type.startswith("video/"):
@@ -485,9 +493,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             file_type = "audio"
         elif mime_type.startswith("image/"):
             file_type = "photo"
-        
+
         file_code = generate_file_code()
-        
+
         saved = await db.save_file(
             file_code,
             document.file_id,
@@ -497,20 +505,20 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             mime_type,
             file_type
         )
-        
+
         if not saved:
-            await update.message.reply_text("❌ Failed to save file.")
+            await update.message.reply_text("❌ Failed to save file — database not connected.")
             return
-        
+
         watch_link = build_watch_link(file_code)
         download_link = build_download_link(file_code)
         file_icon = get_file_icon(file_type)
-        
+
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🎬 Watch", url=watch_link)],
             [InlineKeyboardButton("📥 Download", url=download_link)]
         ])
-        
+
         await update.message.reply_text(
             f"{file_icon} **File Received!**\n\n"
             f"📄 **Name:** `{file_name}`\n"
@@ -522,7 +530,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
         logger.info(f"✅ File processed: {file_code}")
-        
+
     except Exception as e:
         logger.error(f"Document handler error: {e}")
         await update.message.reply_text(f"❌ Error: {str(e)}")
@@ -532,9 +540,9 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         video = update.message.video
         file_name = video.file_name or f"video_{video.file_unique_id}.mp4"
-        
+
         file_code = generate_file_code()
-        
+
         saved = await db.save_file(
             file_code,
             video.file_id,
@@ -544,19 +552,19 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             video.mime_type or "video/mp4",
             "video"
         )
-        
+
         if not saved:
-            await update.message.reply_text("❌ Failed to save video.")
+            await update.message.reply_text("❌ Failed to save video — database not connected.")
             return
-        
+
         watch_link = build_watch_link(file_code)
         download_link = build_download_link(file_code)
-        
+
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🎬 Watch", url=watch_link)],
             [InlineKeyboardButton("📥 Download", url=download_link)]
         ])
-        
+
         await update.message.reply_text(
             f"🎬 **Video Received!**\n\n"
             f"📄 **Name:** `{file_name}`\n"
@@ -567,7 +575,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
         logger.info(f"✅ Video processed: {file_code}")
-        
+
     except Exception as e:
         logger.error(f"Video handler error: {e}")
         await update.message.reply_text(f"❌ Error: {str(e)}")
@@ -577,9 +585,9 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         audio = update.message.audio
         file_name = audio.file_name or f"audio_{audio.file_unique_id}.mp3"
-        
+
         file_code = generate_file_code()
-        
+
         saved = await db.save_file(
             file_code,
             audio.file_id,
@@ -589,19 +597,19 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
             audio.mime_type or "audio/mpeg",
             "audio"
         )
-        
+
         if not saved:
-            await update.message.reply_text("❌ Failed to save audio.")
+            await update.message.reply_text("❌ Failed to save audio — database not connected.")
             return
-        
+
         watch_link = build_watch_link(file_code)
         download_link = build_download_link(file_code)
-        
+
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🎵 Listen", url=watch_link)],
             [InlineKeyboardButton("📥 Download", url=download_link)]
         ])
-        
+
         await update.message.reply_text(
             f"🎵 **Audio Received!**\n\n"
             f"📄 **Name:** `{file_name}`\n"
@@ -612,7 +620,7 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
         logger.info(f"✅ Audio processed: {file_code}")
-        
+
     except Exception as e:
         logger.error(f"Audio handler error: {e}")
         await update.message.reply_text(f"❌ Error: {str(e)}")
@@ -622,9 +630,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         photo = update.message.photo[-1]
         file_name = f"photo_{photo.file_unique_id}.jpg"
-        
+
         file_code = generate_file_code()
-        
+
         saved = await db.save_file(
             file_code,
             photo.file_id,
@@ -634,19 +642,19 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "image/jpeg",
             "photo"
         )
-        
+
         if not saved:
-            await update.message.reply_text("❌ Failed to save photo.")
+            await update.message.reply_text("❌ Failed to save photo — database not connected.")
             return
-        
+
         watch_link = build_watch_link(file_code)
         download_link = build_download_link(file_code)
-        
+
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🖼️ View", url=watch_link)],
             [InlineKeyboardButton("📥 Download", url=download_link)]
         ])
-        
+
         await update.message.reply_text(
             f"🖼️ **Photo Received!**\n\n"
             f"📐 **Resolution:** {photo.width}x{photo.height}\n"
@@ -657,7 +665,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
         logger.info(f"✅ Photo processed: {file_code}")
-        
+
     except Exception as e:
         logger.error(f"Photo handler error: {e}")
         await update.message.reply_text(f"❌ Error: {str(e)}")
@@ -675,25 +683,25 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     threading.Thread(target=run_health_server, daemon=True).start()
-    
+
     app = Application.builder().token(BOT_TOKEN).build()
-    
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
-    
+
     app.add_handler(MessageHandler(filters.VIDEO, handle_video))
     app.add_handler(MessageHandler(filters.AUDIO, handle_audio))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    
+
     app.add_error_handler(error_handler)
-    
+
     logger.info("=" * 50)
     logger.info("🤖 Bot is running...")
     logger.info(f"📛 Username: @{BOT_USERNAME}")
     logger.info(f"🔗 Base URL: {BASE_URL}")
     logger.info("=" * 50)
-    
+
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
