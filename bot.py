@@ -1,212 +1,134 @@
-import os
 import logging
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import asyncio
-import secrets
-import string
-import time
 
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+
+# Load environment variables
 from dotenv import load_dotenv
 load_dotenv()
 
 logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger(__name__)
-
-from pyrogram import Client, filters, idle
-from pyrogram.types import Message
-from pyrogram.errors import FloodWait
-from aiohttp import web
-
-# ============================================================
-# CONFIG
-# ============================================================
-
-API_ID = int(os.getenv("API_ID", "0"))
-API_HASH = os.getenv("API_HASH", "")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-BASE_URL = os.getenv("BASE_URL", "")
-PORT = int(os.getenv("PORT", "10000"))
-
-# ============================================================
-# CREATE BOT
-# ============================================================
-
-app = Client(
-    "bot_session",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-    workdir="."
 )
 
-# ============================================================
-# COMMAND HANDLERS
-# ============================================================
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+PORT = int(os.environ.get("PORT", "10000"))
 
-@app.on_message(filters.command("start"))
-async def start(client, message):
-    logger.info(f"✅ START from {message.from_user.id}")
-    await message.reply_text(
-        "👋 Hello! I'm alive and working!\n\n"
-        "Send me any file and I'll process it.\n"
-        "Send /ping to check if I'm alive."
+
+# ---------- Health server ----------
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is alive")
+
+    def log_message(self, format, *args):
+        pass
+
+
+def run_health_server():
+    server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
+    print(f"Health server running on 0.0.0.0:{PORT}")
+    server.serve_forever()
+
+
+# ---------- Command Handlers ----------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 Hello! I'm your Telegram bot.\n\n"
+        "Send me any file and I'll save it!\n"
+        "Use /help to see available commands."
     )
 
-@app.on_message(filters.command("ping"))
-async def ping(client, message):
-    logger.info(f"✅ PING from {message.from_user.id}")
-    await message.reply_text("🏓 Pong! Bot is alive!")
 
-@app.on_message(filters.command("help"))
-async def help_cmd(client, message):
-    await message.reply_text(
-        "📚 Commands:\n"
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
         "/start - Start the bot\n"
-        "/ping - Check if bot is alive\n"
-        "/help - Show this help\n\n"
-        "Send any file to get a streaming link!"
+        "/help - Show this help message\n\n"
+        "📁 Just send me any file - I'll save it!"
     )
 
-# ============================================================
-# FILE HANDLER
-# ============================================================
 
-@app.on_message(filters.document | filters.video | filters.audio | filters.photo)
-async def handle_file(client, message):
+# ---------- File Handler ----------
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle any document/file upload"""
     try:
-        logger.info(f"📁 File from {message.from_user.id}")
+        document = update.message.document
+        file_name = document.file_name
         
-        file_code = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(8))
+        # Create downloads directory
+        os.makedirs("downloads", exist_ok=True)
         
-        if message.document:
-            file_name = message.document.file_name or "document"
-        elif message.video:
-            file_name = message.video.file_name or "video.mp4"
-        elif message.audio:
-            file_name = message.audio.file_name or "audio.mp3"
-        elif message.photo:
-            file_name = "photo.jpg"
-        else:
-            await message.reply_text("❌ Unsupported file type")
-            return
+        # Download the file
+        file = await context.bot.get_file(document.file_id)
+        download_path = f"downloads/{file_name}"
+        await file.download_to_drive(download_path)
         
-        watch_link = f"{BASE_URL}/watch/{file_code}"
-        download_link = f"{BASE_URL}/download/{file_code}"
+        # Success message
+        response = f"✅ File received!\n"
+        response += f"📄 Name: {file_name}\n"
+        response += f"📦 Size: {document.file_size:,} bytes\n"
+        response += f"💾 Saved as: {download_path}"
         
-        await message.reply_text(
-            f"✅ **File Received!**\n\n"
-            f"📁 Name: `{file_name}`\n"
-            f"🔑 Code: `{file_code}`\n\n"
-            f"🎬 Watch: {watch_link}\n"
-            f"📥 Download: {download_link}"
+        await update.message.reply_text(response)
+        
+    except Exception as e:
+        logging.error(f"Error handling document: {e}")
+        await update.message.reply_text("❌ Failed to process file")
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle photo uploads"""
+    try:
+        photo = update.message.photo[-1]  # Get largest photo
+        file = await context.bot.get_file(photo.file_id)
+        
+        os.makedirs("downloads", exist_ok=True)
+        download_path = f"downloads/photo_{photo.file_id[:8]}.jpg"
+        await file.download_to_drive(download_path)
+        
+        await update.message.reply_text(
+            f"✅ Photo received!\n"
+            f"📐 Resolution: {photo.width}x{photo.height}\n"
+            f"💾 Saved as: {download_path}"
         )
         
-        logger.info(f"✅ File processed: {file_code}")
-        
-    except FloodWait as e:
-        wait_time = e.value
-        logger.warning(f"⏳ FloodWait: {wait_time} seconds")
-        await message.reply_text(f"⏳ Please wait {wait_time // 60} minutes and try again.")
     except Exception as e:
-        logger.error(f"❌ File error: {e}")
-        await message.reply_text(f"❌ Error: {str(e)}")
+        logging.error(f"Error handling photo: {e}")
+        await update.message.reply_text("❌ Failed to process photo")
 
-@app.on_message(filters.text & ~filters.command(["start", "ping", "help"]))
-async def echo(client, message):
-    logger.info(f"📩 Text from {message.from_user.id}")
-    await message.reply_text(f"📩 I received: '{message.text}'")
 
-# ============================================================
-# WEB SERVER
-# ============================================================
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logging.error("Exception while handling an update:", exc_info=context.error)
 
-routes = web.RouteTableDef()
 
-@routes.get("/")
-async def home(request):
-    return web.Response(text="✅ Bot is running!")
+def main():
+    # Start health server in the background
+    threading.Thread(target=run_health_server, daemon=True).start()
 
-@routes.get("/watch/{code}")
-async def watch(request):
-    code = request.match_info.get("code")
-    return web.Response(text=f"Watch file: {code}")
-
-@routes.get("/download/{code}")
-async def download(request):
-    code = request.match_info.get("code")
-    return web.Response(text=f"Download file: {code}")
-
-async def start_web():
-    server = web.Application()
-    server.add_routes(routes)
-    runner = web.AppRunner(server)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    logger.info(f"🌐 Web: http://0.0.0.0:{PORT}")
-    return runner
-
-# ============================================================
-# MAIN
-# ============================================================
-
-async def main():
-    print("=" * 60)
-    print("🚀 STARTING BOT")
-    print("=" * 60)
+    app = Application.builder().token(BOT_TOKEN).build()
     
-    # Start web server
-    web_runner = await start_web()
+    # Command handlers
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
     
-    # Start bot with retry logic
-    max_retries = 5
-    for attempt in range(max_retries):
-        try:
-            await app.start()
-            me = await app.get_me()
-            print("=" * 60)
-            print("✅ BOT STARTED!")
-            print(f"📛 Name: {me.first_name}")
-            print(f"🔖 Username: @{me.username}")
-            print(f"🆔 ID: {me.id}")
-            print("=" * 60)
-            print("📤 Bot is ready!")
-            print("📬 Send /ping to test")
-            print("=" * 60)
-            
-            # ⭐ Keep bot running
-            await idle()
-            break
-            
-        except FloodWait as e:
-            wait_time = e.value
-            minutes = wait_time // 60
-            print(f"⏳ FloodWait: {minutes} minutes. Waiting...")
-            logger.warning(f"FloodWait: {wait_time} seconds")
-            
-            # Wait and retry
-            for remaining in range(wait_time, 0, -60):
-                print(f"⏳ Waiting {remaining // 60} minutes remaining...")
-                await asyncio.sleep(60)
-            
-            print("🔄 Retrying...")
-            
-        except Exception as e:
-            print(f"❌ Error: {e}")
-            logger.error(f"Error: {e}", exc_info=True)
-            break
+    # File handlers
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     
-    # Cleanup
-    await app.stop()
-    await web_runner.cleanup()
-    print("👋 Bot stopped")
+    # Error handler
+    app.add_handler(MessageHandler(filters.ALL, error_handler))
+    app.add_error_handler(error_handler)
+
+    print("🤖 Bot is running...")
+    print("📁 Send me any file to save it!")
+    app.run_polling(drop_pending_updates=True)
+
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n👋 Bot stopped by user")
-    except Exception as e:
-        print(f"❌ Fatal error: {e}")
+    main()
