@@ -88,6 +88,40 @@ def iter_async_gen_sync(agen):
         yield chunk
 
 
+async def _forward_to_log_channel(file_type, file_id, caption):
+    """Re-send the file into LOG_CHANNEL using Pyrogram itself. This is
+    what makes the message reliably fetchable/streamable afterward:
+    Pyrogram only resolves peers for chats it has directly seen via its
+    own MTProto session, and it never sees the user's private chat
+    (that comes in through python-telegram-bot's separate connection).
+    By sending the message itself into LOG_CHANNEL, Pyrogram fully
+    "owns" that message and can get_messages/stream_media it later."""
+    if file_type == "video":
+        return await pyro_app.send_video(LOG_CHANNEL, file_id, caption=caption)
+    elif file_type == "audio":
+        return await pyro_app.send_audio(LOG_CHANNEL, file_id, caption=caption)
+    elif file_type == "photo":
+        return await pyro_app.send_photo(LOG_CHANNEL, file_id, caption=caption)
+    else:
+        return await pyro_app.send_document(LOG_CHANNEL, file_id, caption=caption)
+
+
+def log_file_for_streaming(file_type, file_id, caption):
+    """Returns (chat_id, message_id) if LOG_CHANNEL is configured and the
+    forward succeeds, otherwise (None, None) - callers should fall back
+    to file_id-only (non-seekable) serving in that case."""
+    if not LOG_CHANNEL:
+        logger.warning("LOG_CHANNEL is not set - falling back to non-seekable serving. "
+                        "Set LOG_CHANNEL to a channel ID where the bot is admin for full streaming support.")
+        return None, None
+    try:
+        msg = run_async(_forward_to_log_channel(file_type, file_id, caption), timeout=120)
+        return msg.chat.id, msg.id
+    except Exception as e:
+        logger.error(f"Could not forward file to LOG_CHANNEL: {e}")
+        return None, None
+
+
 async def yield_file_bytes(message, from_bytes, until_bytes):
     """Yield exact byte range [from_bytes, until_bytes] from a Telegram
     media message, using Pyrogram's chunked stream_media."""
@@ -565,8 +599,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif mime_type.startswith("image/"):
             file_type = "photo"
 
+        log_chat_id, log_message_id = log_file_for_streaming("document" if file_type == "document" else file_type, document.file_id, file_name)
+
         save_file(
-            file_code, update.effective_chat.id, update.message.message_id,
+            file_code, log_chat_id, log_message_id,
             document.file_id, document.file_unique_id, file_name, document.file_size,
             mime_type, file_type, user.id
         )
@@ -602,8 +638,10 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_name = video.file_name or f"video_{video.file_unique_id}.mp4"
         file_code = generate_file_code()
 
+        log_chat_id, log_message_id = log_file_for_streaming("video", video.file_id, file_name)
+
         save_file(
-            file_code, update.effective_chat.id, update.message.message_id,
+            file_code, log_chat_id, log_message_id,
             video.file_id, video.file_unique_id, file_name, video.file_size,
             video.mime_type or "video/mp4", "video", user.id
         )
@@ -637,8 +675,10 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_name = audio.file_name or f"audio_{audio.file_unique_id}.mp3"
         file_code = generate_file_code()
 
+        log_chat_id, log_message_id = log_file_for_streaming("audio", audio.file_id, file_name)
+
         save_file(
-            file_code, update.effective_chat.id, update.message.message_id,
+            file_code, log_chat_id, log_message_id,
             audio.file_id, audio.file_unique_id, file_name, audio.file_size,
             audio.mime_type or "audio/mpeg", "audio", user.id
         )
@@ -671,8 +711,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_code = generate_file_code()
         file_name = f"photo_{file_code}.jpg"
 
+        log_chat_id, log_message_id = log_file_for_streaming("photo", photo.file_id, file_name)
+
         save_file(
-            file_code, update.effective_chat.id, update.message.message_id,
+            file_code, log_chat_id, log_message_id,
             photo.file_id, photo.file_unique_id, file_name, photo.file_size,
             "image/jpeg", "photo", user.id
         )
