@@ -71,7 +71,7 @@ def add_user(user):
     except Exception as e:
         logger.error(f"Add user error: {e}")
 
-def save_file(file_code, file_id, unique_id, file_name, file_size, mime_type, file_type, file_path):
+def save_file(file_code, file_id, unique_id, file_name, file_size, mime_type, file_type):
     if files_col is None:
         return True
     try:
@@ -83,7 +83,6 @@ def save_file(file_code, file_id, unique_id, file_name, file_size, mime_type, fi
             "file_size": file_size,
             "mime_type": mime_type,
             "file_type": file_type,
-            "file_path": file_path,
             "upload_date": datetime.now(),
             "downloads": 0,
             "views": 0
@@ -141,7 +140,7 @@ def build_download_link(file_code):
     return f"{BASE_URL}/download/{file_code}"
 
 # ============================================================
-# HEALTH SERVER
+# HEALTH SERVER - FIXED FOR LARGE FILES
 # ============================================================
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -247,9 +246,72 @@ class HealthHandler(BaseHTTPRequestHandler):
             file_code = self.path.split("/")[-1]
             file_data = get_file_by_code(file_code)
             if file_data:
+                # Redirect to Telegram for download
+                file_id = file_data['file_id']
+                # Generate a Telegram download link
+                tg_download_link = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_id}"
+                
+                html = f"""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <meta charset="UTF-8">
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                    <title>Download - {file_data['file_name']}</title>
+                    <style>
+                        body {{
+                            background: #0a0a0a;
+                            color: #fff;
+                            font-family: Arial, sans-serif;
+                            display: flex;
+                            justify-content: center;
+                            align-items: center;
+                            min-height: 100vh;
+                            padding: 20px;
+                        }}
+                        .container {{
+                            max-width: 600px;
+                            width: 100%;
+                            background: #1a1a1a;
+                            border-radius: 16px;
+                            padding: 40px;
+                            text-align: center;
+                        }}
+                        h2 {{ color: #00ff88; }}
+                        .btn {{
+                            display: inline-block;
+                            padding: 12px 30px;
+                            background: #00ff88;
+                            color: #000;
+                            border-radius: 8px;
+                            text-decoration: none;
+                            font-weight: bold;
+                            font-size: 18px;
+                            margin-top: 20px;
+                        }}
+                        .btn:hover {{
+                            background: #00cc77;
+                        }}
+                        .info {{ color: #888; margin: 10px 0; }}
+                    </style>
+                </head>
+                <body>
+                    <div class="container">
+                        <h2>📥 Download File</h2>
+                        <p class="info">📄 {file_data['file_name']}</p>
+                        <p class="info">📦 {human_size(file_data['file_size'])}</p>
+                        <p style="color: #ff6b6b; font-size: 14px;">⚠️ Telegram limits downloads to 20MB for bots</p>
+                        <p style="color: #ffa94d; font-size: 14px;">💡 For large files, use a Telegram client</p>
+                        <a href="{tg_download_link}" class="btn">📥 Download via Telegram</a>
+                        <br>
+                        <a href="/watch/{file_code}" style="color: #888; display: block; margin-top: 15px;">← Back to Watch</a>
+                    </div>
+                </body>
+                </html>
+                """
                 self.send_response(200)
                 self.end_headers()
-                self.wfile.write(f"Download: {file_data['file_name']}".encode('utf-8'))
+                self.wfile.write(html.encode('utf-8'))
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -258,17 +320,23 @@ class HealthHandler(BaseHTTPRequestHandler):
         elif self.path.startswith("/stream/"):
             file_code = self.path.split("/")[-1]
             file_data = get_file_by_code(file_code)
-            if file_data and file_data.get('file_path') and os.path.exists(file_data['file_path']):
-                self.send_response(200)
-                self.send_header('Content-Type', file_data['mime_type'])
-                self.send_header('Content-Disposition', f'inline; filename="{file_data["file_name"]}"')
+            
+            if file_data:
+                # Get file ID from database
+                file_id = file_data['file_id']
+                
+                # Create a redirect to Telegram's CDN
+                # Note: This uses the bot's file URL
+                file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_id}"
+                
+                # Redirect to the file
+                self.send_response(302)
+                self.send_header('Location', file_url)
                 self.end_headers()
-                with open(file_data['file_path'], 'rb') as f:
-                    self.wfile.write(f.read())
             else:
                 self.send_response(404)
                 self.end_headers()
-                self.wfile.write(b"File not available")
+                self.wfile.write(b"File not found")
         else:
             self.send_response(404)
             self.end_headers()
@@ -300,10 +368,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Documents (PDF, DOC, TXT)\n"
         f"• Audio (MP3, WAV)\n"
         f"• Photos\n\n"
-        f"**Commands:**\n"
-        f"/start - Start bot\n"
-        f"/help - Get help\n"
-        f"/stats - Statistics (Owner only)",
+        f"**Note:** Files up to 2GB are supported for streaming!",
         parse_mode='Markdown'
     )
 
@@ -319,10 +384,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✅ Documents: PDF, DOC, DOCX, TXT\n"
         "✅ Audio: MP3, WAV, FLAC\n"
         "✅ Photos: JPG, PNG, GIF\n\n"
-        "**Commands:**\n"
-        "/start - Start the bot\n"
-        "/help - Show this help\n"
-        "/stats - View statistics",
+        "**⚠️ Note:**\n"
+        "• Files up to 2GB are supported\n"
+        "• Large files stream directly from Telegram\n"
+        "• No download required on the server",
         parse_mode='Markdown'
     )
 
@@ -345,24 +410,20 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ============================================================
-# FILE HANDLERS
+# FILE HANDLERS - FIXED FOR LARGE FILES
 # ============================================================
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle document/file upload"""
+    """Handle document/file upload - WITHOUT downloading"""
     try:
         user = update.effective_user
         document = update.message.document
         file_name = document.file_name or "document"
         
-        os.makedirs("downloads", exist_ok=True)
-        
+        # Generate file code
         file_code = generate_file_code()
-        file_path = f"downloads/{file_code}_{file_name}"
         
-        file = await context.bot.get_file(document.file_id)
-        await file.download_to_drive(file_path)
-        
+        # Detect file type
         mime_type = document.mime_type or "application/octet-stream"
         file_type = "document"
         if mime_type.startswith("video/"):
@@ -372,26 +433,31 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif mime_type.startswith("image/"):
             file_type = "photo"
         
+        # Save to database WITHOUT downloading (just store file_id)
         save_file(file_code, document.file_id, document.file_unique_id, 
-                 file_name, document.file_size, mime_type, file_type, file_path)
+                 file_name, document.file_size, mime_type, file_type)
         
+        # Build links
         watch_link = build_watch_link(file_code)
         download_link = build_download_link(file_code)
         
+        # Create inline buttons
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🎬 Watch", url=watch_link)],
             [InlineKeyboardButton("📥 Download", url=download_link)]
         ])
         
+        # Success message with links
         response = (
-            f"✅ **File received and saved!**\n\n"
+            f"✅ **File received!**\n\n"
             f"📄 **Name:** `{file_name}`\n"
             f"📦 **Size:** {human_size(document.file_size)}\n"
             f"📂 **Type:** {file_type.upper()}\n"
             f"🔑 **Code:** `{file_code}`\n\n"
             f"🔗 **Share these links:**\n"
             f"🎬 **Watch:** {watch_link}\n"
-            f"📥 **Download:** {download_link}"
+            f"📥 **Download:** {download_link}\n\n"
+            f"⚡ Large files stream directly from Telegram!"
         )
         
         await update.message.reply_text(response, reply_markup=keyboard, parse_mode='Markdown')
@@ -412,29 +478,25 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.error(f"Log channel error: {e}")
         
-        logger.info(f"✅ File processed: {file_code} - {file_name}")
+        logger.info(f"✅ File processed: {file_code} - {file_name} ({human_size(document.file_size)})")
         
     except Exception as e:
         logger.error(f"Error handling document: {e}")
         await update.message.reply_text(f"❌ Failed to process file: {str(e)}")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle photo uploads"""
+    """Handle photo uploads - WITHOUT downloading"""
     try:
         photo = update.message.photo[-1]
         
-        os.makedirs("downloads", exist_ok=True)
-        
         file_code = generate_file_code()
         file_name = f"photo_{file_code}.jpg"
-        file_path = f"downloads/{file_name}"
         
-        file = await context.bot.get_file(photo.file_id)
-        await file.download_to_drive(file_path)
-        
+        # Save to database WITHOUT downloading
         save_file(file_code, photo.file_id, photo.file_unique_id, 
-                 file_name, photo.file_size, "image/jpeg", "photo", file_path)
+                 file_name, photo.file_size, "image/jpeg", "photo")
         
+        # Build links
         watch_link = build_watch_link(file_code)
         download_link = build_download_link(file_code)
         
@@ -444,7 +506,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
         
         await update.message.reply_text(
-            f"✅ **Photo received and saved!**\n\n"
+            f"✅ **Photo received!**\n\n"
             f"📐 **Resolution:** {photo.width}x{photo.height}\n"
             f"📦 **Size:** {human_size(photo.file_size)}\n"
             f"🔑 **Code:** `{file_code}`\n\n"
@@ -460,24 +522,20 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Failed to process photo: {str(e)}")
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle video uploads"""
+    """Handle video uploads - WITHOUT downloading"""
     try:
         user = update.effective_user
         video = update.message.video
         file_name = video.file_name or f"video_{video.file_unique_id}.mp4"
         
-        os.makedirs("downloads", exist_ok=True)
-        
         file_code = generate_file_code()
-        file_path = f"downloads/{file_code}_{file_name}"
         
-        file = await context.bot.get_file(video.file_id)
-        await file.download_to_drive(file_path)
-        
+        # Save to database WITHOUT downloading
         mime_type = video.mime_type or "video/mp4"
         save_file(file_code, video.file_id, video.file_unique_id, 
-                 file_name, video.file_size, mime_type, "video", file_path)
+                 file_name, video.file_size, mime_type, "video")
         
+        # Build links
         watch_link = build_watch_link(file_code)
         download_link = build_download_link(file_code)
         
@@ -487,13 +545,14 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
         
         await update.message.reply_text(
-            f"✅ **Video received and saved!**\n\n"
+            f"✅ **Video received!**\n\n"
             f"📄 **Name:** `{file_name}`\n"
             f"📦 **Size:** {human_size(video.file_size)}\n"
             f"📐 **Resolution:** {video.width}x{video.height}\n"
             f"⏱️ **Duration:** {video.duration}s\n"
             f"🔑 **Code:** `{file_code}`\n\n"
-            f"🔗 **Share:** {watch_link}",
+            f"🔗 **Share:** {watch_link}\n\n"
+            f"⚡ Streaming large videos directly from Telegram!",
             reply_markup=keyboard,
             parse_mode='Markdown'
         )
@@ -514,30 +573,26 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.error(f"Log channel error: {e}")
         
-        logger.info(f"✅ Video processed: {file_code}")
+        logger.info(f"✅ Video processed: {file_code} - {file_name} ({human_size(video.file_size)})")
         
     except Exception as e:
         logger.error(f"Error handling video: {e}")
         await update.message.reply_text(f"❌ Failed to process video: {str(e)}")
 
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle audio uploads"""
+    """Handle audio uploads - WITHOUT downloading"""
     try:
         audio = update.message.audio
         file_name = audio.file_name or f"audio_{audio.file_unique_id}.mp3"
         
-        os.makedirs("downloads", exist_ok=True)
-        
         file_code = generate_file_code()
-        file_path = f"downloads/{file_code}_{file_name}"
         
-        file = await context.bot.get_file(audio.file_id)
-        await file.download_to_drive(file_path)
-        
+        # Save to database WITHOUT downloading
         mime_type = audio.mime_type or "audio/mpeg"
         save_file(file_code, audio.file_id, audio.file_unique_id, 
-                 file_name, audio.file_size, mime_type, "audio", file_path)
+                 file_name, audio.file_size, mime_type, "audio")
         
+        # Build links
         watch_link = build_watch_link(file_code)
         download_link = build_download_link(file_code)
         
@@ -547,7 +602,7 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
         
         await update.message.reply_text(
-            f"✅ **Audio received and saved!**\n\n"
+            f"✅ **Audio received!**\n\n"
             f"📄 **Name:** `{file_name}`\n"
             f"📦 **Size:** {human_size(audio.file_size)}\n"
             f"⏱️ **Duration:** {audio.duration}s\n"
@@ -585,7 +640,7 @@ def main():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("stats", stats_command))
     
-    # File handlers (Order matters - specific first)
+    # File handlers
     app.add_handler(MessageHandler(filters.VIDEO, handle_video))
     app.add_handler(MessageHandler(filters.AUDIO, handle_audio))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
@@ -599,6 +654,7 @@ def main():
     logger.info(f"📛 Username: @{BOT_USERNAME}")
     logger.info(f"🔗 Base URL: {BASE_URL}")
     logger.info(f"📁 Send me any file to get a streaming link!")
+    logger.info("⚡ Supports files up to 2GB (streaming only)")
     logger.info("=" * 50)
     
     app.run_polling(drop_pending_updates=True)
