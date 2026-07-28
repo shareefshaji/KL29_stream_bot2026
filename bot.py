@@ -28,14 +28,16 @@ BASE_URL = os.getenv("BASE_URL", "")
 PORT = int(os.getenv("PORT", "10000"))
 
 # ============================================================
-# CREATE BOT
+# CREATE BOT WITH PERSISTENT SESSION
 # ============================================================
 
+# ⭐ Use a session file that persists across restarts
 app = Client(
-    "bot",
+    name="bot_session",  # This creates a session file
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
+    workdir="."  # Save session in current directory
 )
 
 # ============================================================
@@ -44,7 +46,7 @@ app = Client(
 
 @app.on_message(filters.command("start"))
 async def start(client, message):
-    logger.info(f"✅ START command received from {message.from_user.id}")
+    logger.info(f"✅ START from {message.from_user.id}")
     await message.reply_text(
         "👋 Hello! I'm alive and working!\n\n"
         "Send me any file and I'll process it.\n"
@@ -53,8 +55,8 @@ async def start(client, message):
 
 @app.on_message(filters.command("ping"))
 async def ping(client, message):
-    logger.info(f"✅ PING command received from {message.from_user.id}")
-    await message.reply_text("🏓 Pong! Bot is alive and working!")
+    logger.info(f"✅ PING from {message.from_user.id}")
+    await message.reply_text("🏓 Pong! Bot is alive!")
 
 @app.on_message(filters.command("help"))
 async def help_cmd(client, message):
@@ -73,12 +75,10 @@ async def help_cmd(client, message):
 @app.on_message(filters.document | filters.video | filters.audio | filters.photo)
 async def handle_file(client, message):
     try:
-        logger.info(f"📁 File received from {message.from_user.id}")
+        logger.info(f"📁 File from {message.from_user.id}")
         
-        # Generate file code
         file_code = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(8))
         
-        # Get file info
         if message.document:
             file_name = message.document.file_name or "document"
         elif message.video:
@@ -91,7 +91,6 @@ async def handle_file(client, message):
             await message.reply_text("❌ Unsupported file type")
             return
         
-        # Build links
         watch_link = f"{BASE_URL}/watch/{file_code}"
         download_link = f"{BASE_URL}/download/{file_code}"
         
@@ -109,18 +108,10 @@ async def handle_file(client, message):
         logger.error(f"❌ File error: {e}")
         await message.reply_text(f"❌ Error: {str(e)}")
 
-# ============================================================
-# ECHO FOR ANY TEXT
-# ============================================================
-
 @app.on_message(filters.text & ~filters.command(["start", "ping", "help"]))
 async def echo(client, message):
-    logger.info(f"📩 Text from {message.from_user.id}: {message.text}")
-    await message.reply_text(
-        f"📩 I received your message: '{message.text}'\n\n"
-        f"Send /ping to check if I'm alive,\n"
-        f"or send me a file!"
-    )
+    logger.info(f"📩 Text from {message.from_user.id}")
+    await message.reply_text(f"📩 I received: '{message.text}'")
 
 # ============================================================
 # WEB SERVER
@@ -164,7 +155,7 @@ async def main():
     # Start web server
     web_runner = await start_web()
     
-    # Start bot
+    # Start bot with flood wait handling
     try:
         await app.start()
         me = await app.get_me()
@@ -178,12 +169,24 @@ async def main():
         print("📬 Send /ping to test")
         print("=" * 60)
         
-        # ⭐ Wait for messages
+        # ⭐ Idle with flood wait handling
         await idle()
         
     except Exception as e:
-        print(f"❌ Error: {e}")
-        logger.error(f"Error: {e}", exc_info=True)
+        error_msg = str(e)
+        if "FLOOD_WAIT" in error_msg:
+            import re
+            wait_time = re.search(r'(\d+)', error_msg)
+            if wait_time:
+                seconds = int(wait_time.group(1))
+                minutes = seconds // 60
+                print(f"⏳ Telegram is rate limiting. Wait {minutes} minutes.")
+                print(f"⏳ The bot will work automatically after {minutes} minutes.")
+            else:
+                print(f"❌ Flood wait error: {e}")
+        else:
+            print(f"❌ Error: {e}")
+            logger.error(f"Error: {e}", exc_info=True)
     
     finally:
         await app.stop()
@@ -191,4 +194,9 @@ async def main():
         print("👋 Bot stopped")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n👋 Bot stopped by user")
+    except Exception as e:
+        print(f"❌ Fatal error: {e}")
