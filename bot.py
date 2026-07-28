@@ -6,6 +6,8 @@ import string
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime
 import urllib.parse
+import requests
+import json
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -140,9 +142,31 @@ def build_watch_link(file_code):
 def build_download_link(file_code):
     return f"{BASE_URL}/download/{file_code}"
 
-def get_file_url(file_id):
-    """Get Telegram file URL"""
-    return f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_id}"
+def get_telegram_file_url(file_id):
+    """Get direct Telegram file URL with error checking"""
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
+    try:
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('ok') and data.get('result'):
+                file_path = data['result']['file_path']
+                return f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+    except Exception as e:
+        logger.error(f"Error getting file URL: {e}")
+    return None
+
+def verify_file_exists(file_id):
+    """Check if file exists on Telegram"""
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
+    try:
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            return data.get('ok', False)
+    except Exception as e:
+        logger.error(f"Error verifying file: {e}")
+    return False
 
 # ============================================================
 # HEALTH SERVER
@@ -166,7 +190,68 @@ class HealthHandler(BaseHTTPRequestHandler):
                 
                 if file_data:
                     # Get file URL for streaming
-                    file_url = get_file_url(file_data['file_id'])
+                    file_url = get_telegram_file_url(file_data['file_id'])
+                    
+                    # Check if file exists
+                    if not file_url:
+                        # File not found on Telegram
+                        html = f"""
+                        <!DOCTYPE html>
+                        <html>
+                        <head>
+                            <meta charset="UTF-8">
+                            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                            <title>File Not Available</title>
+                            <style>
+                                body {{
+                                    background: #0a0a0a;
+                                    color: #fff;
+                                    font-family: Arial, sans-serif;
+                                    display: flex;
+                                    justify-content: center;
+                                    align-items: center;
+                                    min-height: 100vh;
+                                    padding: 20px;
+                                }}
+                                .container {{
+                                    max-width: 600px;
+                                    background: #1a1a1a;
+                                    border-radius: 16px;
+                                    padding: 40px;
+                                    text-align: center;
+                                }}
+                                .icon {{ font-size: 80px; margin-bottom: 20px; }}
+                                h1 {{ color: #ff6b6b; margin-bottom: 20px; }}
+                                p {{ color: #aaa; line-height: 1.6; }}
+                                .btn {{
+                                    display: inline-block;
+                                    padding: 12px 30px;
+                                    background: #00ff88;
+                                    color: #000;
+                                    border-radius: 8px;
+                                    text-decoration: none;
+                                    font-weight: bold;
+                                    margin-top: 20px;
+                                }}
+                            </style>
+                        </head>
+                        <body>
+                            <div class="container">
+                                <div class="icon">⚠️</div>
+                                <h1>File Expired</h1>
+                                <p>The file <strong>{file_data['file_name']}</strong> is no longer available on Telegram's servers.</p>
+                                <p>Please re-upload the file to the bot to generate a new link.</p>
+                                <a href="https://t.me/{BOT_USERNAME}" class="btn">Open Bot</a>
+                            </div>
+                        </body>
+                        </html>
+                        """
+                        self.send_response(200)
+                        self.send_header('Content-Type', 'text/html; charset=utf-8')
+                        self.end_headers()
+                        self.wfile.write(html.encode('utf-8'))
+                        return
+                    
                     file_name = file_data['file_name']
                     file_size = human_size(file_data['file_size'])
                     file_type = file_data['file_type'].upper()
@@ -347,11 +432,15 @@ class HealthHandler(BaseHTTPRequestHandler):
                 file_code = path.split("/")[-1]
                 file_data = get_file_by_code(file_code)
                 if file_data:
-                    # Redirect to Telegram file URL
-                    file_url = get_file_url(file_data['file_id'])
-                    self.send_response(302)
-                    self.send_header('Location', file_url)
-                    self.end_headers()
+                    file_url = get_telegram_file_url(file_data['file_id'])
+                    if file_url:
+                        self.send_response(302)
+                        self.send_header('Location', file_url)
+                        self.end_headers()
+                    else:
+                        self.send_response(404)
+                        self.end_headers()
+                        self.wfile.write(b"File expired or not available")
                 else:
                     self.send_response(404)
                     self.end_headers()
@@ -361,11 +450,16 @@ class HealthHandler(BaseHTTPRequestHandler):
                 file_code = path.split("/")[-1]
                 file_data = get_file_by_code(file_code)
                 if file_data:
-                    # Redirect to Telegram file URL for streaming
-                    file_url = get_file_url(file_data['file_id'])
-                    self.send_response(302)
-                    self.send_header('Location', file_url)
-                    self.end_headers()
+                    file_url = get_telegram_file_url(file_data['file_id'])
+                    if file_url:
+                        # Use 302 redirect for streaming
+                        self.send_response(302)
+                        self.send_header('Location', file_url)
+                        self.end_headers()
+                    else:
+                        self.send_response(404)
+                        self.end_headers()
+                        self.wfile.write(b"File expired or not available")
                 else:
                     self.send_response(404)
                     self.end_headers()
