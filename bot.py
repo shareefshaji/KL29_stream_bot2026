@@ -5,6 +5,7 @@ import secrets
 import string
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime
+import urllib.parse
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -71,7 +72,7 @@ def add_user(user):
     except Exception as e:
         logger.error(f"Add user error: {e}")
 
-def save_file(file_code, file_id, unique_id, file_name, file_size, mime_type, file_type, file_path):
+def save_file(file_code, file_id, unique_id, file_name, file_size, mime_type, file_type):
     if files_col is None:
         return True
     try:
@@ -83,7 +84,6 @@ def save_file(file_code, file_id, unique_id, file_name, file_size, mime_type, fi
             "file_size": file_size,
             "mime_type": mime_type,
             "file_type": file_type,
-            "file_path": file_path,
             "upload_date": datetime.now(),
             "downloads": 0,
             "views": 0
@@ -140,139 +140,246 @@ def build_watch_link(file_code):
 def build_download_link(file_code):
     return f"{BASE_URL}/download/{file_code}"
 
+def get_file_url(file_id):
+    """Get Telegram file URL"""
+    return f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_id}"
+
 # ============================================================
 # HEALTH SERVER
 # ============================================================
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == "/":
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"Bot is alive - Streaming Server")
+        try:
+            # Parse URL
+            parsed_path = urllib.parse.urlparse(self.path)
+            path = parsed_path.path
             
-        elif self.path.startswith("/watch/"):
-            file_code = self.path.split("/")[-1]
-            file_data = get_file_by_code(file_code)
-            
-            if file_data:
-                html = f"""
-                <!DOCTYPE html>
-                <html>
-                <head>
-                    <meta charset="UTF-8">
-                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                    <title>{file_data['file_name']}</title>
-                    <style>
-                        * {{ margin: 0; padding: 0; }}
-                        body {{
-                            background: #0a0a0a;
-                            color: #fff;
-                            font-family: Arial, sans-serif;
-                            min-height: 100vh;
-                            display: flex;
-                            justify-content: center;
-                            align-items: center;
-                            padding: 20px;
-                        }}
-                        .container {{
-                            max-width: 1000px;
-                            width: 100%;
-                            background: #1a1a1a;
-                            border-radius: 16px;
-                            padding: 20px;
-                        }}
-                        .video-wrapper {{
-                            background: #000;
-                            border-radius: 12px;
-                            overflow: hidden;
-                        }}
-                        video {{
-                            width: 100%;
-                            max-height: 80vh;
-                            display: block;
-                        }}
-                        .info {{
-                            padding: 20px 10px 10px 10px;
-                        }}
-                        .info h2 {{
-                            color: #00ff88;
-                            margin-bottom: 10px;
-                        }}
-                        .btn {{
-                            display: inline-block;
-                            padding: 10px 24px;
-                            background: #00ff88;
-                            color: #000;
-                            border-radius: 8px;
-                            text-decoration: none;
-                            font-weight: bold;
-                            margin-right: 10px;
-                        }}
-                        .btn:hover {{
-                            background: #00cc77;
-                        }}
-                    </style>
-                </head>
-                <body>
-                    <div class="container">
-                        <div class="video-wrapper">
-                            <video controls autoplay>
-                                <source src="/stream/{file_code}" type="{file_data['mime_type']}">
-                                Your browser doesn't support video playback.
-                            </video>
-                        </div>
-                        <div class="info">
-                            <h2>{file_data['file_name']}</h2>
-                            <p>Size: {human_size(file_data['file_size'])}</p>
-                            <p>Type: {file_data['file_type'].upper()}</p>
-                            <div style="margin-top: 15px;">
-                                <a href="/download/{file_code}" class="btn">Download</a>
-                                <a href="https://t.me/{BOT_USERNAME}" class="btn" style="background:#333;color:#fff;">Bot</a>
+            if path == "/" or path == "/health":
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"Bot is alive - Streaming Server")
+                
+            elif path.startswith("/watch/"):
+                file_code = path.split("/")[-1]
+                file_data = get_file_by_code(file_code)
+                
+                if file_data:
+                    # Get file URL for streaming
+                    file_url = get_file_url(file_data['file_id'])
+                    file_name = file_data['file_name']
+                    file_size = human_size(file_data['file_size'])
+                    file_type = file_data['file_type'].upper()
+                    mime_type = file_data['mime_type']
+                    
+                    # Determine if it's a video/audio for HTML5 player
+                    is_video = mime_type.startswith('video/')
+                    is_audio = mime_type.startswith('audio/')
+                    is_image = mime_type.startswith('image/')
+                    
+                    # Build HTML response
+                    html = f"""
+                    <!DOCTYPE html>
+                    <html>
+                    <head>
+                        <meta charset="UTF-8">
+                        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                        <title>{file_name}</title>
+                        <style>
+                            * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+                            body {{
+                                background: #0a0a0a;
+                                color: #fff;
+                                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+                                min-height: 100vh;
+                                display: flex;
+                                justify-content: center;
+                                align-items: center;
+                                padding: 20px;
+                            }}
+                            .container {{
+                                max-width: 1000px;
+                                width: 100%;
+                                background: #1a1a1a;
+                                border-radius: 16px;
+                                padding: 20px;
+                                box-shadow: 0 20px 60px rgba(0,0,0,0.8);
+                            }}
+                            .media-wrapper {{
+                                background: #000;
+                                border-radius: 12px;
+                                overflow: hidden;
+                                position: relative;
+                            }}
+                            video, audio, img {{
+                                width: 100%;
+                                max-height: 80vh;
+                                display: block;
+                            }}
+                            .info {{
+                                padding: 20px 10px 10px 10px;
+                            }}
+                            .info h2 {{
+                                color: #00ff88;
+                                margin-bottom: 10px;
+                                font-size: 1.5rem;
+                                word-break: break-all;
+                            }}
+                            .info p {{
+                                color: #aaa;
+                                margin: 5px 0;
+                            }}
+                            .btn-group {{
+                                margin-top: 15px;
+                                display: flex;
+                                gap: 10px;
+                                flex-wrap: wrap;
+                            }}
+                            .btn {{
+                                display: inline-block;
+                                padding: 10px 24px;
+                                background: #00ff88;
+                                color: #000;
+                                border-radius: 8px;
+                                text-decoration: none;
+                                font-weight: bold;
+                                transition: all 0.3s;
+                            }}
+                            .btn:hover {{
+                                background: #00cc77;
+                                transform: translateY(-2px);
+                            }}
+                            .btn-secondary {{
+                                background: #333;
+                                color: #fff;
+                            }}
+                            .btn-secondary:hover {{
+                                background: #444;
+                            }}
+                            .file-code {{
+                                background: #222;
+                                padding: 5px 12px;
+                                border-radius: 6px;
+                                font-family: monospace;
+                                color: #00ff88;
+                                display: inline-block;
+                                margin-top: 10px;
+                            }}
+                            .footer {{
+                                margin-top: 20px;
+                                text-align: center;
+                                color: #666;
+                                font-size: 0.9rem;
+                            }}
+                            .footer a {{
+                                color: #00ff88;
+                                text-decoration: none;
+                            }}
+                            @media (max-width: 600px) {{
+                                .container {{ padding: 10px; }}
+                                .info h2 {{ font-size: 1.2rem; }}
+                                .btn {{ padding: 8px 16px; font-size: 0.9rem; }}
+                            }}
+                        </style>
+                    </head>
+                    <body>
+                        <div class="container">
+                            <div class="media-wrapper">
+                    """
+                    
+                    # Add appropriate media player
+                    if is_video:
+                        html += f"""
+                                <video controls autoplay>
+                                    <source src="/stream/{file_code}" type="{mime_type}">
+                                    Your browser doesn't support video playback.
+                                </video>
+                        """
+                    elif is_audio:
+                        html += f"""
+                                <audio controls autoplay style="padding: 40px 20px;">
+                                    <source src="/stream/{file_code}" type="{mime_type}">
+                                    Your browser doesn't support audio playback.
+                                </audio>
+                        """
+                    elif is_image:
+                        html += f"""
+                                <img src="/stream/{file_code}" alt="{file_name}" style="max-height: 80vh; width: auto; margin: 0 auto;">
+                        """
+                    else:
+                        html += f"""
+                                <div style="padding: 60px 20px; text-align: center;">
+                                    <div style="font-size: 64px; margin-bottom: 20px;">📄</div>
+                                    <p style="color: #aaa;">Document preview not available</p>
+                                </div>
+                        """
+                    
+                    html += f"""
+                            </div>
+                            <div class="info">
+                                <h2>{file_name}</h2>
+                                <p>📦 Size: {file_size}</p>
+                                <p>📂 Type: {file_type}</p>
+                                <div class="file-code">🔑 {file_code}</div>
+                                <div class="btn-group">
+                                    <a href="/download/{file_code}" class="btn">📥 Download</a>
+                                    <a href="https://t.me/{BOT_USERNAME}" class="btn btn-secondary">🤖 Bot</a>
+                                </div>
+                            </div>
+                            <div class="footer">
+                                Powered by <a href="https://t.me/{BOT_USERNAME}">@{BOT_USERNAME}</a>
                             </div>
                         </div>
-                    </div>
-                </body>
-                </html>
-                """
-                self.send_response(200)
-                self.end_headers()
-                self.wfile.write(html.encode('utf-8'))
+                    </body>
+                    </html>
+                    """
+                    
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/html; charset=utf-8')
+                    self.end_headers()
+                    self.wfile.write(html.encode('utf-8'))
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+                    self.wfile.write(b"File not found")
+                    
+            elif path.startswith("/download/"):
+                file_code = path.split("/")[-1]
+                file_data = get_file_by_code(file_code)
+                if file_data:
+                    # Redirect to Telegram file URL
+                    file_url = get_file_url(file_data['file_id'])
+                    self.send_response(302)
+                    self.send_header('Location', file_url)
+                    self.end_headers()
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+                    self.wfile.write(b"File not found")
+                    
+            elif path.startswith("/stream/"):
+                file_code = path.split("/")[-1]
+                file_data = get_file_by_code(file_code)
+                if file_data:
+                    # Redirect to Telegram file URL for streaming
+                    file_url = get_file_url(file_data['file_id'])
+                    self.send_response(302)
+                    self.send_header('Location', file_url)
+                    self.end_headers()
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+                    self.wfile.write(b"File not available")
             else:
                 self.send_response(404)
                 self.end_headers()
-                self.wfile.write(b"File not found")
+                self.wfile.write(b"Not found")
                 
-        elif self.path.startswith("/download/"):
-            file_code = self.path.split("/")[-1]
-            file_data = get_file_by_code(file_code)
-            if file_data:
-                self.send_response(200)
-                self.end_headers()
-                self.wfile.write(f"Download: {file_data['file_name']}".encode('utf-8'))
-            else:
-                self.send_response(404)
-                self.end_headers()
-                self.wfile.write(b"File not found")
-                
-        elif self.path.startswith("/stream/"):
-            file_code = self.path.split("/")[-1]
-            file_data = get_file_by_code(file_code)
-            if file_data and file_data.get('file_path') and os.path.exists(file_data['file_path']):
-                self.send_response(200)
-                self.send_header('Content-Type', file_data['mime_type'])
-                self.send_header('Content-Disposition', f'inline; filename="{file_data["file_name"]}"')
-                self.end_headers()
-                with open(file_data['file_path'], 'rb') as f:
-                    self.wfile.write(f.read())
-            else:
-                self.send_response(404)
-                self.end_headers()
-                self.wfile.write(b"File not available")
-        else:
-            self.send_response(404)
+        except Exception as e:
+            logger.error(f"Server error: {e}")
+            self.send_response(500)
             self.end_headers()
-            self.wfile.write(b"Not found")
+            self.wfile.write(b"Internal server error")
 
     def log_message(self, format, *args):
         pass
@@ -355,13 +462,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         document = update.message.document
         file_name = document.file_name or "document"
         
-        os.makedirs("downloads", exist_ok=True)
-        
         file_code = generate_file_code()
-        file_path = f"downloads/{file_code}_{file_name}"
-        
-        file = await context.bot.get_file(document.file_id)
-        await file.download_to_drive(file_path)
         
         mime_type = document.mime_type or "application/octet-stream"
         file_type = "document"
@@ -372,8 +473,16 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif mime_type.startswith("image/"):
             file_type = "photo"
         
-        save_file(file_code, document.file_id, document.file_unique_id, 
-                 file_name, document.file_size, mime_type, file_type, file_path)
+        # Save to database with Telegram's file_id
+        save_file(
+            file_code, 
+            document.file_id,
+            document.file_unique_id, 
+            file_name, 
+            document.file_size, 
+            mime_type, 
+            file_type
+        )
         
         watch_link = build_watch_link(file_code)
         download_link = build_download_link(file_code)
@@ -421,19 +530,21 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle photo uploads"""
     try:
-        photo = update.message.photo[-1]
-        
-        os.makedirs("downloads", exist_ok=True)
+        photo = update.message.photo[-1]  # Get the highest quality photo
         
         file_code = generate_file_code()
         file_name = f"photo_{file_code}.jpg"
-        file_path = f"downloads/{file_name}"
         
-        file = await context.bot.get_file(photo.file_id)
-        await file.download_to_drive(file_path)
-        
-        save_file(file_code, photo.file_id, photo.file_unique_id, 
-                 file_name, photo.file_size, "image/jpeg", "photo", file_path)
+        # Save to database
+        save_file(
+            file_code, 
+            photo.file_id,
+            photo.file_unique_id, 
+            file_name, 
+            photo.file_size, 
+            "image/jpeg", 
+            "photo"
+        )
         
         watch_link = build_watch_link(file_code)
         download_link = build_download_link(file_code)
@@ -466,17 +577,20 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         video = update.message.video
         file_name = video.file_name or f"video_{video.file_unique_id}.mp4"
         
-        os.makedirs("downloads", exist_ok=True)
-        
         file_code = generate_file_code()
-        file_path = f"downloads/{file_code}_{file_name}"
-        
-        file = await context.bot.get_file(video.file_id)
-        await file.download_to_drive(file_path)
         
         mime_type = video.mime_type or "video/mp4"
-        save_file(file_code, video.file_id, video.file_unique_id, 
-                 file_name, video.file_size, mime_type, "video", file_path)
+        
+        # Save to database
+        save_file(
+            file_code, 
+            video.file_id,
+            video.file_unique_id, 
+            file_name, 
+            video.file_size, 
+            mime_type, 
+            "video"
+        )
         
         watch_link = build_watch_link(file_code)
         download_link = build_download_link(file_code)
@@ -526,17 +640,20 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         audio = update.message.audio
         file_name = audio.file_name or f"audio_{audio.file_unique_id}.mp3"
         
-        os.makedirs("downloads", exist_ok=True)
-        
         file_code = generate_file_code()
-        file_path = f"downloads/{file_code}_{file_name}"
-        
-        file = await context.bot.get_file(audio.file_id)
-        await file.download_to_drive(file_path)
         
         mime_type = audio.mime_type or "audio/mpeg"
-        save_file(file_code, audio.file_id, audio.file_unique_id, 
-                 file_name, audio.file_size, mime_type, "audio", file_path)
+        
+        # Save to database
+        save_file(
+            file_code, 
+            audio.file_id,
+            audio.file_unique_id, 
+            file_name, 
+            audio.file_size, 
+            mime_type, 
+            "audio"
+        )
         
         watch_link = build_watch_link(file_code)
         download_link = build_download_link(file_code)
