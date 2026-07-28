@@ -71,10 +71,18 @@ def get_db():
         logger.error(f"❌ MongoDB connection failed: {e}")
         return None
 
-# Initialize database
+# Initialize database - FIXED: Don't use db in boolean context
 db = get_db()
-users_col = db.users if db else None
-files_col = db.files if db else None
+
+# FIXED: Check if db is None properly
+if db is not None:
+    users_col = db.users
+    files_col = db.files
+    logger.info("✅ Database collections ready")
+else:
+    users_col = None
+    files_col = None
+    logger.warning("⚠️ Running without database")
 
 # ============================================================
 # DATABASE FUNCTIONS
@@ -119,7 +127,7 @@ def save_file(file_code, file_id, file_unique_id, file_name, file_size, mime_typ
         logger.info(f"✅ File saved: {file_name} - Code: {file_code}")
         
         # Update user's file count
-        if users_col:
+        if users_col is not None:
             users_col.update_one(
                 {"user_id": user_id},
                 {"$inc": {"files_uploaded": 1}}
@@ -225,7 +233,7 @@ def get_file_icon(file_type):
     return icons.get(file_type, "📎")
 
 # ============================================================
-# HEALTH SERVER - COMPLETE
+# HEALTH SERVER
 # ============================================================
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -360,7 +368,6 @@ class HealthHandler(BaseHTTPRequestHandler):
                             <h2><span class="file-type-icon">{file_icon}</span> {file_data['file_name']}</h2>
                             <p>📦 Size: {human_size(file_data['file_size'])}</p>
                             <p>📂 Type: {file_data['file_type'].upper()}</p>
-                            <p>📅 Uploaded: {file_data['upload_date'].strftime('%Y-%m-%d %H:%M') if file_data.get('upload_date') else 'Unknown'}</p>
                             <span class="badge">👁️ {file_data.get('views', 0)} views</span>
                             <div class="actions">
                                 <a href="/download/{file_code}" class="btn btn-primary">📥 Download</a>
@@ -499,7 +506,6 @@ class HealthHandler(BaseHTTPRequestHandler):
                             <p><span class="label">📦 Size:</span> {human_size(file_data['file_size'])}</p>
                             <p><span class="label">📂 Type:</span> {file_data['file_type'].upper()}</p>
                             <p><span class="label">🔑 Code:</span> {file_code}</p>
-                            <p><span class="label">📅 Uploaded:</span> {file_data['upload_date'].strftime('%Y-%m-%d %H:%M') if file_data.get('upload_date') else 'Unknown'}</p>
                             <p><span class="label">👁️ Downloads:</span> {file_data.get('downloads', 0)}</p>
                         </div>
                         <div class="actions">
@@ -564,7 +570,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Get user's file count
     file_count = 0
-    if files_col:
+    if files_col is not None:
         try:
             file_count = files_col.count_documents({"user_id": user.id})
         except:
@@ -621,7 +627,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     files = total_files()
     
     # Get database status
-    db_status = "✅ Connected" if db else "❌ Not connected"
+    db_status = "✅ Connected" if db is not None else "❌ Not connected"
     
     await update.message.reply_text(
         f"📊 **Bot Statistics**\n\n"
@@ -962,7 +968,7 @@ def main():
     logger.info("🤖 Bot is running...")
     logger.info(f"📛 Username: @{BOT_USERNAME}")
     logger.info(f"🔗 Base URL: {BASE_URL}")
-    logger.info(f"📊 Database: {'✅ Connected' if db else '❌ Not connected'}")
+    logger.info(f"📊 Database: {'✅ Connected' if db is not None else '❌ Not connected'}")
     logger.info(f"📁 Send me any file to get a streaming link!")
     logger.info("=" * 50)
     
