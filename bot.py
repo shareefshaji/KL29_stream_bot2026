@@ -3,6 +3,7 @@ import logging
 import asyncio
 import secrets
 import string
+import time
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -15,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message
+from pyrogram.errors import FloodWait
 from aiohttp import web
 
 # ============================================================
@@ -28,16 +30,15 @@ BASE_URL = os.getenv("BASE_URL", "")
 PORT = int(os.getenv("PORT", "10000"))
 
 # ============================================================
-# CREATE BOT WITH PERSISTENT SESSION
+# CREATE BOT
 # ============================================================
 
-# ⭐ Use a session file that persists across restarts
 app = Client(
-    name="bot_session",  # This creates a session file
+    "bot_session",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    workdir="."  # Save session in current directory
+    workdir="."
 )
 
 # ============================================================
@@ -104,6 +105,10 @@ async def handle_file(client, message):
         
         logger.info(f"✅ File processed: {file_code}")
         
+    except FloodWait as e:
+        wait_time = e.value
+        logger.warning(f"⏳ FloodWait: {wait_time} seconds")
+        await message.reply_text(f"⏳ Please wait {wait_time // 60} minutes and try again.")
     except Exception as e:
         logger.error(f"❌ File error: {e}")
         await message.reply_text(f"❌ Error: {str(e)}")
@@ -155,43 +160,48 @@ async def main():
     # Start web server
     web_runner = await start_web()
     
-    # Start bot with flood wait handling
-    try:
-        await app.start()
-        me = await app.get_me()
-        print("=" * 60)
-        print("✅ BOT STARTED!")
-        print(f"📛 Name: {me.first_name}")
-        print(f"🔖 Username: @{me.username}")
-        print(f"🆔 ID: {me.id}")
-        print("=" * 60)
-        print("📤 Bot is ready!")
-        print("📬 Send /ping to test")
-        print("=" * 60)
-        
-        # ⭐ Idle with flood wait handling
-        await idle()
-        
-    except Exception as e:
-        error_msg = str(e)
-        if "FLOOD_WAIT" in error_msg:
-            import re
-            wait_time = re.search(r'(\d+)', error_msg)
-            if wait_time:
-                seconds = int(wait_time.group(1))
-                minutes = seconds // 60
-                print(f"⏳ Telegram is rate limiting. Wait {minutes} minutes.")
-                print(f"⏳ The bot will work automatically after {minutes} minutes.")
-            else:
-                print(f"❌ Flood wait error: {e}")
-        else:
+    # Start bot with retry logic
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            await app.start()
+            me = await app.get_me()
+            print("=" * 60)
+            print("✅ BOT STARTED!")
+            print(f"📛 Name: {me.first_name}")
+            print(f"🔖 Username: @{me.username}")
+            print(f"🆔 ID: {me.id}")
+            print("=" * 60)
+            print("📤 Bot is ready!")
+            print("📬 Send /ping to test")
+            print("=" * 60)
+            
+            # ⭐ Keep bot running
+            await idle()
+            break
+            
+        except FloodWait as e:
+            wait_time = e.value
+            minutes = wait_time // 60
+            print(f"⏳ FloodWait: {minutes} minutes. Waiting...")
+            logger.warning(f"FloodWait: {wait_time} seconds")
+            
+            # Wait and retry
+            for remaining in range(wait_time, 0, -60):
+                print(f"⏳ Waiting {remaining // 60} minutes remaining...")
+                await asyncio.sleep(60)
+            
+            print("🔄 Retrying...")
+            
+        except Exception as e:
             print(f"❌ Error: {e}")
             logger.error(f"Error: {e}", exc_info=True)
+            break
     
-    finally:
-        await app.stop()
-        await web_runner.cleanup()
-        print("👋 Bot stopped")
+    # Cleanup
+    await app.stop()
+    await web_runner.cleanup()
+    print("👋 Bot stopped")
 
 if __name__ == "__main__":
     try:
