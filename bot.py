@@ -5,10 +5,14 @@ import secrets
 import string
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime
-import requests
+import asyncio
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+
+# Pyrogram for file handling
+from pyrogram import Client as PyrogramClient
+from pyrogram.errors import FloodWait
 
 # Load environment variables
 from dotenv import load_dotenv
@@ -25,6 +29,8 @@ logger = logging.getLogger(__name__)
 # ============================================================
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+API_ID = int(os.environ.get("API_ID", "0"))
+API_HASH = os.environ.get("API_HASH", "")
 PORT = int(os.environ.get("PORT", "10000"))
 BASE_URL = os.environ.get("BASE_URL", "")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "")
@@ -37,29 +43,28 @@ DATABASE_NAME = os.environ.get("DATABASE_NAME", "telegram_stream_bot")
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL", "0"))
 
-logger.info("=" * 50)
-logger.info("Bot Configuration:")
-logger.info(f"BOT_TOKEN: {'✅ Set' if BOT_TOKEN else '❌ Missing'}")
-logger.info(f"BASE_URL: {BASE_URL}")
-logger.info("=" * 50)
+# ============================================================
+# PYROGRAM CLIENT (For file downloads)
+# ============================================================
+
+pyro_app = PyrogramClient(
+    "bot_session",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    workers=4
+)
 
 # ============================================================
 # MONGODB CONNECTION
 # ============================================================
 
 def get_db():
-    """Get MongoDB database connection"""
     if not MONGO_URI:
-        logger.warning("MONGO_URI not set - Running without database")
         return None
-    
     try:
         import pymongo
-        client = pymongo.MongoClient(
-            MONGO_URI,
-            serverSelectionTimeoutMS=5000,
-            connectTimeoutMS=5000
-        )
+        client = pymongo.MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
         client.admin.command('ping')
         db = client[DATABASE_NAME]
         logger.info(f"✅ MongoDB connected: {DATABASE_NAME}")
@@ -69,15 +74,8 @@ def get_db():
         return None
 
 db = get_db()
-
-if db is not None:
-    users_col = db.users
-    files_col = db.files
-    logger.info("✅ Database collections ready")
-else:
-    users_col = None
-    files_col = None
-    logger.warning("⚠️ Running without database")
+users_col = db.users if db is not None else None
+files_col = db.files if db is not None else None
 
 # ============================================================
 # DATABASE FUNCTIONS
@@ -95,14 +93,12 @@ def add_user(user):
                 "joined_date": datetime.now(),
                 "files_uploaded": 0
             })
-            logger.info(f"✅ New user: {user.id}")
     except Exception as e:
         logger.error(f"Add user error: {e}")
 
 def save_file(file_code, file_id, file_unique_id, file_name, file_size, mime_type, file_type, user_id):
     if files_col is None:
-        logger.warning(f"File not saved - no database: {file_name}")
-        return False
+        return True
     try:
         files_col.insert_one({
             "file_code": file_code,
@@ -117,12 +113,8 @@ def save_file(file_code, file_id, file_unique_id, file_name, file_size, mime_typ
             "downloads": 0,
             "views": 0
         })
-        logger.info(f"✅ File saved: {file_name} - Code: {file_code}")
         if users_col is not None:
-            users_col.update_one(
-                {"user_id": user_id},
-                {"$inc": {"files_uploaded": 1}}
-            )
+            users_col.update_one({"user_id": user_id}, {"$inc": {"files_uploaded": 1}})
         return True
     except Exception as e:
         logger.error(f"Save file error: {e}")
@@ -134,30 +126,23 @@ def get_file_by_code(file_code):
     try:
         return files_col.find_one({"file_code": file_code})
     except Exception as e:
-        logger.error(f"Get file error: {e}")
         return None
 
 def increment_downloads(file_code):
     if files_col is None:
         return
     try:
-        files_col.update_one(
-            {"file_code": file_code},
-            {"$inc": {"downloads": 1}}
-        )
-    except Exception as e:
-        logger.error(f"Increment downloads error: {e}")
+        files_col.update_one({"file_code": file_code}, {"$inc": {"downloads": 1}})
+    except:
+        pass
 
 def increment_views(file_code):
     if files_col is None:
         return
     try:
-        files_col.update_one(
-            {"file_code": file_code},
-            {"$inc": {"views": 1}}
-        )
-    except Exception as e:
-        logger.error(f"Increment views error: {e}")
+        files_col.update_one({"file_code": file_code}, {"$inc": {"views": 1}})
+    except:
+        pass
 
 def total_users():
     if users_col is None:
@@ -180,8 +165,7 @@ def get_user_files(user_id):
         return []
     try:
         return list(files_col.find({"user_id": user_id}).sort("upload_date", -1).limit(10))
-    except Exception as e:
-        logger.error(f"Get user files error: {e}")
+    except:
         return []
 
 # ============================================================
@@ -208,17 +192,11 @@ def build_download_link(file_code):
     return f"{BASE_URL}/download/{file_code}"
 
 def get_file_icon(file_type):
-    icons = {
-        "video": "🎬",
-        "document": "📄",
-        "audio": "🎵",
-        "photo": "🖼️",
-        "other": "📎"
-    }
+    icons = {"video": "🎬", "document": "📄", "audio": "🎵", "photo": "🖼️", "other": "📎"}
     return icons.get(file_type, "📎")
 
 # ============================================================
-# HEALTH SERVER - FIXED STREAMING
+# HEALTH SERVER - WITH PYROGRAM FILE HANDLING
 # ============================================================
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -377,35 +355,50 @@ class HealthHandler(BaseHTTPRequestHandler):
             if file_data:
                 increment_downloads(file_code)
                 
-                # Get the file URL from Telegram
-                file_id = file_data['file_id']
-                
-                # Method 1: Try to get file path first
+                # Download file using Pyrogram and serve it
                 try:
-                    # Get file path from Telegram
-                    import requests
-                    get_file_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
-                    response = requests.get(get_file_url)
-                    result = response.json()
+                    file_id = file_data['file_id']
+                    file_name = file_data['file_name']
                     
-                    if result.get('ok'):
-                        file_path = result['result']['file_path']
-                        # Build the download URL
-                        download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
-                        
-                        # Redirect to the actual file
-                        self.send_response(302)
-                        self.send_header('Location', download_url)
+                    # Create downloads directory
+                    os.makedirs("downloads", exist_ok=True)
+                    
+                    # Download using Pyrogram
+                    file_path = f"downloads/{file_code}_{file_name}"
+                    
+                    # Use pyrogram to download
+                    import asyncio
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    
+                    # Download the file
+                    downloaded = loop.run_until_complete(
+                        pyro_app.download_media(file_id, file_path=file_path)
+                    )
+                    
+                    if downloaded and os.path.exists(downloaded):
+                        # Serve the file
+                        self.send_response(200)
+                        self.send_header('Content-Type', file_data['mime_type'])
+                        self.send_header('Content-Disposition', f'attachment; filename="{file_name}"')
+                        self.send_header('Content-Length', str(os.path.getsize(downloaded)))
                         self.end_headers()
-                        return
+                        
+                        with open(downloaded, 'rb') as f:
+                            self.wfile.write(f.read())
+                        
+                        # Clean up after sending
+                        os.remove(downloaded)
+                    else:
+                        self.send_response(404)
+                        self.end_headers()
+                        self.wfile.write(b"File not available")
+                        
                 except Exception as e:
-                    logger.error(f"Error getting file path: {e}")
-                
-                # Method 2: Fallback - Use the direct file ID URL (may not work for all)
-                fallback_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_id}"
-                self.send_response(302)
-                self.send_header('Location', fallback_url)
-                self.end_headers()
+                    logger.error(f"Download error: {e}")
+                    self.send_response(500)
+                    self.end_headers()
+                    self.wfile.write(f"Error: {str(e)}".encode('utf-8'))
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -416,34 +409,51 @@ class HealthHandler(BaseHTTPRequestHandler):
             file_data = get_file_by_code(file_code)
             
             if file_data:
-                # Get the file URL from Telegram
-                file_id = file_data['file_id']
+                increment_views(file_code)
                 
                 try:
-                    # Get file path from Telegram
-                    import requests
-                    get_file_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
-                    response = requests.get(get_file_url)
-                    result = response.json()
+                    file_id = file_data['file_id']
+                    file_name = file_data['file_name']
+                    mime_type = file_data['mime_type']
                     
-                    if result.get('ok'):
-                        file_path = result['result']['file_path']
-                        # Build the streaming URL
-                        stream_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
-                        
-                        # Redirect to the actual file
-                        self.send_response(302)
-                        self.send_header('Location', stream_url)
+                    # Create downloads directory
+                    os.makedirs("downloads", exist_ok=True)
+                    
+                    # Download using Pyrogram
+                    file_path = f"downloads/stream_{file_code}_{file_name}"
+                    
+                    import asyncio
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    
+                    downloaded = loop.run_until_complete(
+                        pyro_app.download_media(file_id, file_path=file_path)
+                    )
+                    
+                    if downloaded and os.path.exists(downloaded):
+                        # Stream the file
+                        self.send_response(200)
+                        self.send_header('Content-Type', mime_type)
+                        self.send_header('Content-Disposition', f'inline; filename="{file_name}"')
+                        self.send_header('Content-Length', str(os.path.getsize(downloaded)))
+                        self.send_header('Accept-Ranges', 'bytes')
                         self.end_headers()
-                        return
+                        
+                        with open(downloaded, 'rb') as f:
+                            self.wfile.write(f.read())
+                        
+                        # Clean up
+                        os.remove(downloaded)
+                    else:
+                        self.send_response(404)
+                        self.end_headers()
+                        self.wfile.write(b"File not available")
+                        
                 except Exception as e:
-                    logger.error(f"Error getting file path: {e}")
-                
-                # Fallback
-                fallback_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_id}"
-                self.send_response(302)
-                self.send_header('Location', fallback_url)
-                self.end_headers()
+                    logger.error(f"Stream error: {e}")
+                    self.send_response(500)
+                    self.end_headers()
+                    self.wfile.write(f"Error: {str(e)}".encode('utf-8'))
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -463,19 +473,12 @@ def run_health_server():
     server.serve_forever()
 
 # ============================================================
-# TELEGRAM COMMAND HANDLERS
+# TELEGRAM COMMAND HANDLERS (python-telegram-bot)
 # ============================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     add_user(user)
-    
-    file_count = 0
-    if files_col is not None:
-        try:
-            file_count = files_col.count_documents({"user_id": user.id})
-        except:
-            pass
     
     await update.message.reply_text(
         f"👋 **Hello {user.first_name}!**\n\n"
@@ -489,7 +492,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"**Commands:**\n"
         f"/start - Start bot\n"
         f"/help - Get help\n"
-        f"/stats - View statistics\n"
         f"/myfiles - View your uploaded files",
         parse_mode='Markdown'
     )
@@ -501,36 +503,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1️⃣ Send any file to the bot\n"
         "2️⃣ I'll generate a streaming link\n"
         "3️⃣ Share the link with anyone!\n\n"
-        "**Supported formats:**\n"
-        "✅ Videos: MP4, MKV, AVI, MOV, WEBM\n"
-        "✅ Documents: PDF, DOC, DOCX, TXT, PPT\n"
-        "✅ Audio: MP3, WAV, FLAC, M4A\n"
-        "✅ Photos: JPG, PNG, GIF, WEBP\n\n"
         "**Commands:**\n"
         "/start - Start the bot\n"
         "/help - Show this help\n"
-        "/stats - View bot statistics\n"
         "/myfiles - View your uploaded files",
-        parse_mode='Markdown'
-    )
-
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if OWNER_ID and user.id != OWNER_ID:
-        await update.message.reply_text("❌ Unauthorized")
-        return
-    
-    users = total_users()
-    files = total_files()
-    db_status = "✅ Connected" if db is not None else "❌ Not connected"
-    
-    await update.message.reply_text(
-        f"📊 **Bot Statistics**\n\n"
-        f"👤 **Users:** {users}\n"
-        f"📁 **Files:** {files}\n"
-        f"📊 **Database:** {db_status}\n"
-        f"🤖 **Status:** Online ✅\n"
-        f"🔗 **Base URL:** {BASE_URL}",
         parse_mode='Markdown'
     )
 
@@ -554,10 +530,6 @@ async def myfiles_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         response += f"   🔑 Code: `{file['file_code']}`\n"
         response += f"   📦 {human_size(file['file_size'])}\n\n"
     
-    if len(files) > 10:
-        response += f"📌 Showing 10 of {len(files)} files\n"
-    
-    response += f"\n💡 Send any file to get a new streaming link!"
     await update.message.reply_text(response, parse_mode='Markdown')
 
 # ============================================================
@@ -581,7 +553,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif mime_type.startswith("image/"):
             file_type = "photo"
         
-        saved = save_file(
+        save_file(
             file_code,
             document.file_id,
             document.file_unique_id,
@@ -591,10 +563,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             file_type,
             user.id
         )
-        
-        if not saved:
-            await update.message.reply_text("❌ Failed to save file. Please try again.")
-            return
         
         watch_link = build_watch_link(file_code)
         download_link = build_download_link(file_code)
@@ -616,75 +584,11 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         await update.message.reply_text(response, reply_markup=keyboard, parse_mode='Markdown')
-        
-        if LOG_CHANNEL:
-            try:
-                await context.bot.send_message(
-                    LOG_CHANNEL,
-                    f"📁 **New File Uploaded**\n\n"
-                    f"👤 User: {user.first_name} (@{user.username or 'N/A'})\n"
-                    f"🆔 ID: `{user.id}`\n"
-                    f"📄 File: `{file_name}`\n"
-                    f"📦 Size: {human_size(document.file_size)}\n"
-                    f"🔑 Code: `{file_code}`\n"
-                    f"🔗 Link: {watch_link}",
-                    parse_mode='Markdown'
-                )
-            except Exception as e:
-                logger.error(f"Log channel error: {e}")
-        
         logger.info(f"✅ File processed: {file_code} - {file_name}")
         
     except Exception as e:
         logger.error(f"Document handler error: {e}")
-        await update.message.reply_text(f"❌ Failed to process file: {str(e)}")
-
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        user = update.effective_user
-        photo = update.message.photo[-1]
-        
-        file_code = generate_file_code()
-        file_name = f"photo_{file_code}.jpg"
-        
-        saved = save_file(
-            file_code,
-            photo.file_id,
-            photo.file_unique_id,
-            file_name,
-            photo.file_size,
-            "image/jpeg",
-            "photo",
-            user.id
-        )
-        
-        if not saved:
-            await update.message.reply_text("❌ Failed to save photo. Please try again.")
-            return
-        
-        watch_link = build_watch_link(file_code)
-        download_link = build_download_link(file_code)
-        
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🖼️ View", url=watch_link)],
-            [InlineKeyboardButton("📥 Download", url=download_link)]
-        ])
-        
-        await update.message.reply_text(
-            f"🖼️ **Photo Received!**\n\n"
-            f"📐 **Resolution:** {photo.width}x{photo.height}\n"
-            f"📦 **Size:** {human_size(photo.file_size)}\n"
-            f"🔑 **Code:** `{file_code}`\n\n"
-            f"🔗 {watch_link}",
-            reply_markup=keyboard,
-            parse_mode='Markdown'
-        )
-        
-        logger.info(f"✅ Photo processed: {file_code}")
-        
-    except Exception as e:
-        logger.error(f"Photo handler error: {e}")
-        await update.message.reply_text(f"❌ Failed to process photo: {str(e)}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -694,7 +598,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         file_code = generate_file_code()
         
-        saved = save_file(
+        save_file(
             file_code,
             video.file_id,
             video.file_unique_id,
@@ -704,10 +608,6 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "video",
             user.id
         )
-        
-        if not saved:
-            await update.message.reply_text("❌ Failed to save video. Please try again.")
-            return
         
         watch_link = build_watch_link(file_code)
         download_link = build_download_link(file_code)
@@ -728,28 +628,11 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=keyboard,
             parse_mode='Markdown'
         )
-        
-        if LOG_CHANNEL:
-            try:
-                await context.bot.send_message(
-                    LOG_CHANNEL,
-                    f"🎬 **New Video Uploaded**\n\n"
-                    f"👤 User: {user.first_name} (@{user.username or 'N/A'})\n"
-                    f"🆔 ID: `{user.id}`\n"
-                    f"📄 File: `{file_name}`\n"
-                    f"📦 Size: {human_size(video.file_size)}\n"
-                    f"🔑 Code: `{file_code}`\n"
-                    f"🔗 Link: {watch_link}",
-                    parse_mode='Markdown'
-                )
-            except Exception as e:
-                logger.error(f"Log channel error: {e}")
-        
-        logger.info(f"✅ Video processed: {file_code} - {file_name}")
+        logger.info(f"✅ Video processed: {file_code}")
         
     except Exception as e:
         logger.error(f"Video handler error: {e}")
-        await update.message.reply_text(f"❌ Failed to process video: {str(e)}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
 
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -759,7 +642,7 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         file_code = generate_file_code()
         
-        saved = save_file(
+        save_file(
             file_code,
             audio.file_id,
             audio.file_unique_id,
@@ -769,10 +652,6 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "audio",
             user.id
         )
-        
-        if not saved:
-            await update.message.reply_text("❌ Failed to save audio. Please try again.")
-            return
         
         watch_link = build_watch_link(file_code)
         download_link = build_download_link(file_code)
@@ -788,58 +667,113 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📦 **Size:** {human_size(audio.file_size)}\n"
             f"⏱️ **Duration:** {audio.duration}s\n"
             f"🔑 **Code:** `{file_code}`\n\n"
-            f"🔗 {watch_link}",
+            f"🔗 **Watch:** {watch_link}",
             reply_markup=keyboard,
             parse_mode='Markdown'
         )
-        
         logger.info(f"✅ Audio processed: {file_code}")
         
     except Exception as e:
         logger.error(f"Audio handler error: {e}")
-        await update.message.reply_text(f"❌ Failed to process audio: {str(e)}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user = update.effective_user
+        photo = update.message.photo[-1]
+        
+        file_code = generate_file_code()
+        file_name = f"photo_{file_code}.jpg"
+        
+        save_file(
+            file_code,
+            photo.file_id,
+            photo.file_unique_id,
+            file_name,
+            photo.file_size,
+            "image/jpeg",
+            "photo",
+            user.id
+        )
+        
+        watch_link = build_watch_link(file_code)
+        download_link = build_download_link(file_code)
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🖼️ View", url=watch_link)],
+            [InlineKeyboardButton("📥 Download", url=download_link)]
+        ])
+        
+        await update.message.reply_text(
+            f"🖼️ **Photo Received!**\n\n"
+            f"📐 **Resolution:** {photo.width}x{photo.height}\n"
+            f"📦 **Size:** {human_size(photo.file_size)}\n"
+            f"🔑 **Code:** `{file_code}`\n\n"
+            f"🔗 {watch_link}",
+            reply_markup=keyboard,
+            parse_mode='Markdown'
+        )
+        logger.info(f"✅ Photo processed: {file_code}")
+        
+    except Exception as e:
+        logger.error(f"Photo handler error: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
 
 # ============================================================
 # ERROR HANDLER
 # ============================================================
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.error("Exception while handling an update:", exc_info=context.error)
+    logger.error("Exception:", exc_info=context.error)
 
 # ============================================================
 # MAIN
 # ============================================================
 
-def main():
-    # Start health server
-    threading.Thread(target=run_health_server, daemon=True).start()
+async def start_pyrogram():
+    """Start Pyrogram client"""
+    try:
+        await pyro_app.start()
+        logger.info("✅ Pyrogram client started")
+        me = await pyro_app.get_me()
+        logger.info(f"📛 Pyrogram Bot: {me.first_name}")
+    except Exception as e:
+        logger.error(f"Pyrogram start error: {e}")
 
-    # Create application
+def run_telegram_bot():
+    """Run python-telegram-bot"""
     app = Application.builder().token(BOT_TOKEN).build()
     
-    # Command handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("myfiles", myfiles_command))
     
-    # File handlers
     app.add_handler(MessageHandler(filters.VIDEO, handle_video))
     app.add_handler(MessageHandler(filters.AUDIO, handle_audio))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     
-    # Error handler
     app.add_error_handler(error_handler)
-
+    
     logger.info("=" * 50)
     logger.info("🤖 Bot is running...")
     logger.info(f"📛 Username: @{BOT_USERNAME}")
     logger.info(f"🔗 Base URL: {BASE_URL}")
-    logger.info(f"📊 Database: {'✅ Connected' if db is not None else '❌ Not connected'}")
     logger.info("=" * 50)
     
     app.run_polling(drop_pending_updates=True)
+
+def main():
+    # Start health server
+    threading.Thread(target=run_health_server, daemon=True).start()
+    
+    # Start Pyrogram in background
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(start_pyrogram())
+    
+    # Run telegram bot
+    run_telegram_bot()
 
 if __name__ == "__main__":
     main()
