@@ -5,6 +5,7 @@ import secrets
 import string
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime
+import requests
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -35,14 +36,11 @@ DATABASE_NAME = os.environ.get("DATABASE_NAME", "telegram_stream_bot")
 # Other configs
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL", "0"))
-FORCE_SUB_CHANNEL = int(os.environ.get("FORCE_SUB_CHANNEL", "0"))
 
 logger.info("=" * 50)
 logger.info("Bot Configuration:")
 logger.info(f"BOT_TOKEN: {'✅ Set' if BOT_TOKEN else '❌ Missing'}")
 logger.info(f"BASE_URL: {BASE_URL}")
-logger.info(f"MONGO_URI: {'✅ Set' if MONGO_URI else '⚠️ Not set'}")
-logger.info(f"DATABASE_NAME: {DATABASE_NAME}")
 logger.info("=" * 50)
 
 # ============================================================
@@ -62,7 +60,6 @@ def get_db():
             serverSelectionTimeoutMS=5000,
             connectTimeoutMS=5000
         )
-        # Test connection
         client.admin.command('ping')
         db = client[DATABASE_NAME]
         logger.info(f"✅ MongoDB connected: {DATABASE_NAME}")
@@ -71,10 +68,8 @@ def get_db():
         logger.error(f"❌ MongoDB connection failed: {e}")
         return None
 
-# Initialize database - FIXED: Don't use db in boolean context
 db = get_db()
 
-# FIXED: Check if db is None properly
 if db is not None:
     users_col = db.users
     files_col = db.files
@@ -89,7 +84,6 @@ else:
 # ============================================================
 
 def add_user(user):
-    """Add user to database"""
     if users_col is None:
         return
     try:
@@ -101,12 +95,11 @@ def add_user(user):
                 "joined_date": datetime.now(),
                 "files_uploaded": 0
             })
-            logger.info(f"✅ New user: {user.id} - {user.first_name}")
+            logger.info(f"✅ New user: {user.id}")
     except Exception as e:
         logger.error(f"Add user error: {e}")
 
 def save_file(file_code, file_id, file_unique_id, file_name, file_size, mime_type, file_type, user_id):
-    """Save file to database"""
     if files_col is None:
         logger.warning(f"File not saved - no database: {file_name}")
         return False
@@ -125,8 +118,6 @@ def save_file(file_code, file_id, file_unique_id, file_name, file_size, mime_typ
             "views": 0
         })
         logger.info(f"✅ File saved: {file_name} - Code: {file_code}")
-        
-        # Update user's file count
         if users_col is not None:
             users_col.update_one(
                 {"user_id": user_id},
@@ -138,7 +129,6 @@ def save_file(file_code, file_id, file_unique_id, file_name, file_size, mime_typ
         return False
 
 def get_file_by_code(file_code):
-    """Get file from database by code"""
     if files_col is None:
         return None
     try:
@@ -148,7 +138,6 @@ def get_file_by_code(file_code):
         return None
 
 def increment_downloads(file_code):
-    """Increment download count"""
     if files_col is None:
         return
     try:
@@ -160,7 +149,6 @@ def increment_downloads(file_code):
         logger.error(f"Increment downloads error: {e}")
 
 def increment_views(file_code):
-    """Increment view count"""
     if files_col is None:
         return
     try:
@@ -172,7 +160,6 @@ def increment_views(file_code):
         logger.error(f"Increment views error: {e}")
 
 def total_users():
-    """Get total users count"""
     if users_col is None:
         return 0
     try:
@@ -181,7 +168,6 @@ def total_users():
         return 0
 
 def total_files():
-    """Get total files count"""
     if files_col is None:
         return 0
     try:
@@ -190,7 +176,6 @@ def total_files():
         return 0
 
 def get_user_files(user_id):
-    """Get files uploaded by a user"""
     if files_col is None:
         return []
     try:
@@ -233,7 +218,7 @@ def get_file_icon(file_type):
     return icons.get(file_type, "📎")
 
 # ============================================================
-# HEALTH SERVER
+# HEALTH SERVER - FIXED STREAMING
 # ============================================================
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -361,7 +346,6 @@ class HealthHandler(BaseHTTPRequestHandler):
                             <video controls autoplay>
                                 <source src="/stream/{file_code}" type="{file_data['mime_type']}">
                                 Your browser doesn't support video playback.
-                                <a href="/download/{file_code}">Download file</a>
                             </video>
                         </div>
                         <div class="info">
@@ -392,136 +376,36 @@ class HealthHandler(BaseHTTPRequestHandler):
             
             if file_data:
                 increment_downloads(file_code)
-                file_icon = get_file_icon(file_data['file_type'])
                 
-                html = f"""
-                <!DOCTYPE html>
-                <html>
-                <head>
-                    <meta charset="UTF-8">
-                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                    <title>Download - {file_data['file_name']}</title>
-                    <style>
-                        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-                        body {{
-                            background: #0a0a0a;
-                            color: #fff;
-                            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
-                            min-height: 100vh;
-                            display: flex;
-                            justify-content: center;
-                            align-items: center;
-                            padding: 20px;
-                        }}
-                        .container {{
-                            max-width: 600px;
-                            width: 100%;
-                            background: #1a1a1a;
-                            border-radius: 16px;
-                            padding: 40px;
-                            text-align: center;
-                        }}
-                        .icon {{
-                            font-size: 4em;
-                            margin-bottom: 20px;
-                        }}
-                        h2 {{ color: #00ff88; margin-bottom: 15px; word-break: break-all; }}
-                        .info {{
-                            color: #888;
-                            margin: 10px 0;
-                            font-size: 1em;
-                        }}
-                        .file-info {{
-                            background: #0a0a0a;
-                            padding: 15px;
-                            border-radius: 8px;
-                            margin: 20px 0;
-                            text-align: left;
-                        }}
-                        .file-info p {{
-                            margin: 5px 0;
-                            color: #ccc;
-                        }}
-                        .file-info .label {{
-                            color: #888;
-                            font-size: 0.9em;
-                        }}
-                        .btn {{
-                            display: inline-block;
-                            padding: 12px 30px;
-                            border-radius: 8px;
-                            text-decoration: none;
-                            font-weight: bold;
-                            margin: 10px 5px;
-                            transition: all 0.3s;
-                            border: none;
-                            cursor: pointer;
-                            font-size: 1em;
-                        }}
-                        .btn-primary {{
-                            background: #00ff88;
-                            color: #000;
-                        }}
-                        .btn-primary:hover {{
-                            background: #00cc77;
-                            transform: translateY(-2px);
-                        }}
-                        .btn-secondary {{
-                            background: #333;
-                            color: #fff;
-                        }}
-                        .btn-secondary:hover {{
-                            background: #444;
-                            transform: translateY(-2px);
-                        }}
-                        .note {{
-                            color: #ffa94d;
-                            font-size: 0.9em;
-                            margin-top: 20px;
-                            padding: 15px;
-                            background: #0a0a0a;
-                            border-radius: 8px;
-                            border-left: 3px solid #ffa94d;
-                            text-align: left;
-                        }}
-                        .actions {{
-                            display: flex;
-                            gap: 10px;
-                            justify-content: center;
-                            flex-wrap: wrap;
-                            margin-top: 20px;
-                        }}
-                        @media (max-width: 600px) {{
-                            .container {{ padding: 20px; }}
-                            .actions {{ flex-direction: column; }}
-                            .btn {{ width: 100%; }}
-                        }}
-                    </style>
-                </head>
-                <body>
-                    <div class="container">
-                        <div class="icon">{file_icon}</div>
-                        <h2>{file_data['file_name']}</h2>
-                        <div class="file-info">
-                            <p><span class="label">📦 Size:</span> {human_size(file_data['file_size'])}</p>
-                            <p><span class="label">📂 Type:</span> {file_data['file_type'].upper()}</p>
-                            <p><span class="label">🔑 Code:</span> {file_code}</p>
-                            <p><span class="label">👁️ Downloads:</span> {file_data.get('downloads', 0)}</p>
-                        </div>
-                        <div class="actions">
-                            <a href="/watch/{file_code}" class="btn btn-secondary">🎬 Watch</a>
-                            <a href="https://t.me/{BOT_USERNAME}" class="btn btn-secondary">🤖 Bot</a>
-                        </div>
-                        <div class="note">
-                            💡 <strong>Tip:</strong> For large files, use the Watch button to stream directly in your browser.
-                        </div>
-                    </div>
-                </body>
-                </html>
-                """
-                self.send_response(200)
+                # Get the file URL from Telegram
+                file_id = file_data['file_id']
+                
+                # Method 1: Try to get file path first
+                try:
+                    # Get file path from Telegram
+                    import requests
+                    get_file_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
+                    response = requests.get(get_file_url)
+                    result = response.json()
+                    
+                    if result.get('ok'):
+                        file_path = result['result']['file_path']
+                        # Build the download URL
+                        download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+                        
+                        # Redirect to the actual file
+                        self.send_response(302)
+                        self.send_header('Location', download_url)
+                        self.end_headers()
+                        return
+                except Exception as e:
+                    logger.error(f"Error getting file path: {e}")
+                
+                # Method 2: Fallback - Use the direct file ID URL (may not work for all)
+                fallback_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_id}"
+                self.send_response(302)
+                self.send_header('Location', fallback_url)
                 self.end_headers()
-                self.wfile.write(html.encode('utf-8'))
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -532,13 +416,33 @@ class HealthHandler(BaseHTTPRequestHandler):
             file_data = get_file_by_code(file_code)
             
             if file_data:
-                # Get file from Telegram
+                # Get the file URL from Telegram
                 file_id = file_data['file_id']
-                file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_id}"
                 
-                # Redirect to Telegram's file URL
+                try:
+                    # Get file path from Telegram
+                    import requests
+                    get_file_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
+                    response = requests.get(get_file_url)
+                    result = response.json()
+                    
+                    if result.get('ok'):
+                        file_path = result['result']['file_path']
+                        # Build the streaming URL
+                        stream_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+                        
+                        # Redirect to the actual file
+                        self.send_response(302)
+                        self.send_header('Location', stream_url)
+                        self.end_headers()
+                        return
+                except Exception as e:
+                    logger.error(f"Error getting file path: {e}")
+                
+                # Fallback
+                fallback_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_id}"
                 self.send_response(302)
-                self.send_header('Location', file_url)
+                self.send_header('Location', fallback_url)
                 self.end_headers()
             else:
                 self.send_response(404)
@@ -564,11 +468,8 @@ def run_health_server():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    
-    # Add user to database
     add_user(user)
     
-    # Get user's file count
     file_count = 0
     if files_col is not None:
         try:
@@ -585,8 +486,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• 📄 Documents (PDF, DOC, TXT)\n"
         f"• 🎵 Audio (MP3, WAV)\n"
         f"• 🖼️ Photos\n\n"
-        f"**Your Stats:**\n"
-        f"📁 Files uploaded: {file_count}\n\n"
         f"**Commands:**\n"
         f"/start - Start bot\n"
         f"/help - Get help\n"
@@ -617,22 +516,18 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    
-    # Check if owner
     if OWNER_ID and user.id != OWNER_ID:
-        await update.message.reply_text("❌ Unauthorized. This command is for the bot owner only.")
+        await update.message.reply_text("❌ Unauthorized")
         return
     
     users = total_users()
     files = total_files()
-    
-    # Get database status
     db_status = "✅ Connected" if db is not None else "❌ Not connected"
     
     await update.message.reply_text(
         f"📊 **Bot Statistics**\n\n"
-        f"👤 **Total Users:** {users}\n"
-        f"📁 **Total Files:** {files}\n"
+        f"👤 **Users:** {users}\n"
+        f"📁 **Files:** {files}\n"
         f"📊 **Database:** {db_status}\n"
         f"🤖 **Status:** Online ✅\n"
         f"🔗 **Base URL:** {BASE_URL}",
@@ -641,7 +536,6 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def myfiles_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    
     files = get_user_files(user.id)
     
     if not files:
@@ -653,7 +547,6 @@ async def myfiles_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # Show recent files
     response = "📁 **Your Recent Files**\n\n"
     for i, file in enumerate(files[:10], 1):
         file_icon = get_file_icon(file['file_type'])
@@ -665,7 +558,6 @@ async def myfiles_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         response += f"📌 Showing 10 of {len(files)} files\n"
     
     response += f"\n💡 Send any file to get a new streaming link!"
-    
     await update.message.reply_text(response, parse_mode='Markdown')
 
 # ============================================================
@@ -673,16 +565,13 @@ async def myfiles_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle document/file upload"""
     try:
         user = update.effective_user
         document = update.message.document
         file_name = document.file_name or "document"
         
-        # Generate file code
         file_code = generate_file_code()
         
-        # Detect file type
         mime_type = document.mime_type or "application/octet-stream"
         file_type = "document"
         if mime_type.startswith("video/"):
@@ -692,7 +581,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif mime_type.startswith("image/"):
             file_type = "photo"
         
-        # Save to database
         saved = save_file(
             file_code,
             document.file_id,
@@ -708,32 +596,27 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Failed to save file. Please try again.")
             return
         
-        # Build links
         watch_link = build_watch_link(file_code)
         download_link = build_download_link(file_code)
         file_icon = get_file_icon(file_type)
         
-        # Create inline buttons
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🎬 Watch", url=watch_link)],
             [InlineKeyboardButton("📥 Download", url=download_link)]
         ])
         
-        # Success message
         response = (
             f"{file_icon} **File Received!**\n\n"
             f"📄 **Name:** `{file_name}`\n"
             f"📦 **Size:** {human_size(document.file_size)}\n"
             f"📂 **Type:** {file_type.upper()}\n"
             f"🔑 **Code:** `{file_code}`\n\n"
-            f"🔗 **Share these links:**\n"
-            f"🎬 {watch_link}\n"
-            f"📥 {download_link}"
+            f"🔗 **Watch:** {watch_link}\n"
+            f"📥 **Download:** {download_link}"
         )
         
         await update.message.reply_text(response, reply_markup=keyboard, parse_mode='Markdown')
         
-        # Log to channel if enabled
         if LOG_CHANNEL:
             try:
                 await context.bot.send_message(
@@ -757,15 +640,13 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Failed to process file: {str(e)}")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle photo uploads"""
     try:
         user = update.effective_user
-        photo = update.message.photo[-1]  # Get largest photo
+        photo = update.message.photo[-1]
         
         file_code = generate_file_code()
         file_name = f"photo_{file_code}.jpg"
         
-        # Save to database
         saved = save_file(
             file_code,
             photo.file_id,
@@ -781,7 +662,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Failed to save photo. Please try again.")
             return
         
-        # Build links
         watch_link = build_watch_link(file_code)
         download_link = build_download_link(file_code)
         
@@ -807,7 +687,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Failed to process photo: {str(e)}")
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle video uploads"""
     try:
         user = update.effective_user
         video = update.message.video
@@ -815,7 +694,6 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         file_code = generate_file_code()
         
-        # Save to database
         saved = save_file(
             file_code,
             video.file_id,
@@ -831,7 +709,6 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Failed to save video. Please try again.")
             return
         
-        # Build links
         watch_link = build_watch_link(file_code)
         download_link = build_download_link(file_code)
         
@@ -847,12 +724,11 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📐 **Resolution:** {video.width}x{video.height}\n"
             f"⏱️ **Duration:** {video.duration}s\n"
             f"🔑 **Code:** `{file_code}`\n\n"
-            f"🔗 {watch_link}",
+            f"🔗 **Watch:** {watch_link}",
             reply_markup=keyboard,
             parse_mode='Markdown'
         )
         
-        # Log to channel if enabled
         if LOG_CHANNEL:
             try:
                 await context.bot.send_message(
@@ -876,7 +752,6 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Failed to process video: {str(e)}")
 
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle audio uploads"""
     try:
         user = update.effective_user
         audio = update.message.audio
@@ -884,7 +759,6 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         file_code = generate_file_code()
         
-        # Save to database
         saved = save_file(
             file_code,
             audio.file_id,
@@ -900,7 +774,6 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Failed to save audio. Please try again.")
             return
         
-        # Build links
         watch_link = build_watch_link(file_code)
         download_link = build_download_link(file_code)
         
@@ -932,18 +805,13 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error("Exception while handling an update:", exc_info=context.error)
-    if update and hasattr(update, 'message') and update.message:
-        try:
-            await update.message.reply_text("❌ An unexpected error occurred. Please try again.")
-        except:
-            pass
 
 # ============================================================
 # MAIN
 # ============================================================
 
 def main():
-    # Start health server in the background
+    # Start health server
     threading.Thread(target=run_health_server, daemon=True).start()
 
     # Create application
@@ -969,7 +837,6 @@ def main():
     logger.info(f"📛 Username: @{BOT_USERNAME}")
     logger.info(f"🔗 Base URL: {BASE_URL}")
     logger.info(f"📊 Database: {'✅ Connected' if db is not None else '❌ Not connected'}")
-    logger.info(f"📁 Send me any file to get a streaming link!")
     logger.info("=" * 50)
     
     app.run_polling(drop_pending_updates=True)
