@@ -3,7 +3,6 @@ import os
 import threading
 import secrets
 import string
-import requests
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime
 
@@ -24,134 +23,99 @@ logger = logging.getLogger(__name__)
 # CONFIG
 # ============================================================
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-PORT = int(os.getenv("PORT", "10000"))
-BASE_URL = os.getenv("BASE_URL", "")
-BOT_USERNAME = os.getenv("BOT_USERNAME", "")
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+PORT = int(os.environ.get("PORT", "10000"))
+BASE_URL = os.environ.get("BASE_URL", "https://kl29-stream-bot2026.onrender.com")
+BOT_USERNAME = os.environ.get("BOT_USERNAME", "kl29royalfilebot")
 
-# MongoDB
-MONGO_URI = os.getenv("MONGO_URI", "")
-DATABASE_NAME = os.getenv("DATABASE_NAME", "telegram_stream_bot")
-
-# Admin/Owner
-OWNER_ID = int(os.getenv("OWNER_ID", "0"))
-LOG_CHANNEL = int(os.getenv("LOG_CHANNEL", "0"))
+# Optional MongoDB
+MONGO_URI = os.environ.get("MONGO_URI", "")
+DATABASE_NAME = os.environ.get("DATABASE_NAME", "telegram_stream_bot")
+OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
+FORCE_SUB_CHANNEL = int(os.environ.get("FORCE_SUB_CHANNEL", "0"))
+LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL", "0"))
 
 # ============================================================
-# MONGODB DATABASE
+# DATABASE (Optional)
 # ============================================================
 
-class Database:
-    def __init__(self):
-        self.client = None
-        self.db = None
-        self.users = None
-        self.files = None
+users_col = None
+files_col = None
 
-        if MONGO_URI:
-            try:
-                import pymongo
-                self.client = pymongo.MongoClient(
-                    MONGO_URI,
-                    serverSelectionTimeoutMS=5000,
-                    connectTimeoutMS=5000
-                )
-                self.client.admin.command('ping')
-                self.db = self.client[DATABASE_NAME]
-                self.users = self.db.users
-                self.files = self.db.files
-                logger.info("✅ MongoDB connected successfully")
-            except Exception as e:
-                logger.warning(f"⚠️ MongoDB connection failed: {e}")
-                self.client = None
-                self.db = None
-                self.users = None
-                self.files = None
-        else:
-            logger.warning("⚠️ MONGO_URI not set - running without database")
+if MONGO_URI:
+    try:
+        import pymongo
+        client = pymongo.MongoClient(MONGO_URI)
+        db = client[DATABASE_NAME]
+        users_col = db.users
+        files_col = db.files
+        logger.info("✅ MongoDB connected")
+    except Exception as e:
+        logger.warning(f"⚠️ MongoDB not connected: {e}")
 
-    async def add_user(self, user):
-        if self.users is None:
-            return
-        try:
-            if not self.users.find_one({"user_id": user.id}):
-                self.users.insert_one({
-                    "user_id": user.id,
-                    "first_name": user.first_name or "Unknown",
-                    "username": user.username or "Unknown",
-                    "joined_date": datetime.now(),
-                    "files_uploaded": 0
-                })
-                logger.info(f"✅ New user: {user.id}")
-        except Exception as e:
-            logger.error(f"Add user error: {e}")
+# ============================================================
+# DATABASE FUNCTIONS
+# ============================================================
 
-    async def total_users(self):
-        if self.users is None:
-            return 0
-        try:
-            return self.users.count_documents({})
-        except:
-            return 0
-
-    async def save_file(self, file_code, file_id, unique_id, file_name, file_size, mime_type, file_type):
-        if self.files is None:
-            logger.error("❌ save_file called but self.files is None (no DB connection)")
-            return False
-        try:
-            self.files.insert_one({
-                "file_code": file_code,
-                "file_id": file_id,
-                "unique_id": unique_id,
-                "file_name": file_name,
-                "file_size": file_size,
-                "mime_type": mime_type,
-                "file_type": file_type,
-                "upload_date": datetime.now(),
-                "downloads": 0,
-                "views": 0
+def add_user(user):
+    if users_col is None:
+        return
+    try:
+        if not users_col.find_one({"user_id": user.id}):
+            users_col.insert_one({
+                "user_id": user.id,
+                "first_name": user.first_name or "Unknown",
+                "username": user.username or "Unknown",
+                "joined_date": datetime.now()
             })
-            logger.info(f"✅ File saved: {file_name} - Code: {file_code}")
-            return True
-        except Exception as e:
-            logger.error(f"Save file error: {e}")
-            return False
+    except Exception as e:
+        logger.error(f"Add user error: {e}")
 
-    async def get_file(self, file_code):
-        if self.files is None:
-            logger.error("❌ get_file called but self.files is None (no DB connection)")
-            return None
-        try:
-            return self.files.find_one({"file_code": file_code})
-        except Exception as e:
-            logger.error(f"Get file error: {e}")
-            return None
+def save_file(file_code, file_id, unique_id, file_name, file_size, mime_type, file_type, file_path):
+    if files_col is None:
+        return True
+    try:
+        files_col.insert_one({
+            "file_code": file_code,
+            "file_id": file_id,
+            "unique_id": unique_id,
+            "file_name": file_name,
+            "file_size": file_size,
+            "mime_type": mime_type,
+            "file_type": file_type,
+            "file_path": file_path,
+            "upload_date": datetime.now(),
+            "downloads": 0,
+            "views": 0
+        })
+        return True
+    except Exception as e:
+        logger.error(f"Save file error: {e}")
+        return False
 
-    async def total_files(self):
-        if self.files is None:
-            return 0
-        try:
-            return self.files.count_documents({})
-        except:
-            return 0
+def get_file_by_code(file_code):
+    if files_col is None:
+        return None
+    try:
+        return files_col.find_one({"file_code": file_code})
+    except Exception as e:
+        return None
 
-    async def increment_views(self, file_code):
-        if self.files is None:
-            return
-        try:
-            self.files.update_one({"file_code": file_code}, {"$inc": {"views": 1}})
-        except:
-            pass
+def total_users():
+    if users_col is None:
+        return 0
+    try:
+        return users_col.count_documents({})
+    except:
+        return 0
 
-    async def increment_downloads(self, file_code):
-        if self.files is None:
-            return
-        try:
-            self.files.update_one({"file_code": file_code}, {"$inc": {"downloads": 1}})
-        except:
-            pass
-
-db = Database()
+def total_files():
+    if files_col is None:
+        return 0
+    try:
+        return files_col.count_documents({})
+    except:
+        return 0
 
 # ============================================================
 # UTILITIES
@@ -161,7 +125,7 @@ def generate_file_code(length: int = 8) -> str:
     alphabet = string.ascii_letters + string.digits
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
-def human_size(size: int) -> str:
+def human_size(size):
     if size is None:
         return "Unknown"
     size = float(size)
@@ -170,40 +134,11 @@ def human_size(size: int) -> str:
             return f"{int(size)} {unit}" if unit == "B" else f"{size:.2f} {unit}"
         size /= 1024
 
-def get_file_icon(file_type):
-    icons = {"video": "🎬", "document": "📄", "audio": "🎵", "photo": "🖼️", "other": "📎"}
-    return icons.get(file_type, "📎")
-
 def build_watch_link(file_code):
     return f"{BASE_URL}/watch/{file_code}"
 
 def build_download_link(file_code):
     return f"{BASE_URL}/download/{file_code}"
-
-def get_telegram_file_path(file_id):
-    """Get the actual file path from Telegram API"""
-    try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
-        response = requests.get(url, timeout=10)
-        data = response.json()
-
-        if data.get('ok') and data.get('result'):
-            file_path = data['result'].get('file_path')
-            if file_path:
-                logger.info(f"✅ Got file path: {file_path}")
-                return file_path
-        logger.error(f"❌ Failed to get file path: {data}")
-        return None
-    except Exception as e:
-        logger.error(f"❌ Error getting file path: {e}")
-        return None
-
-def get_telegram_file_url(file_id):
-    """Get the full download URL for a Telegram file"""
-    file_path = get_telegram_file_path(file_id)
-    if file_path:
-        return f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
-    return None
 
 # ============================================================
 # HEALTH SERVER
@@ -215,15 +150,12 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"Bot is alive - Streaming Server")
-
+            
         elif self.path.startswith("/watch/"):
             file_code = self.path.split("/")[-1]
-            file_data = self._get_file_data(file_code)
-
+            file_data = get_file_by_code(file_code)
+            
             if file_data:
-                self._increment_views(file_code)
-                file_icon = get_file_icon(file_data.get('file_type', 'other'))
-
                 html = f"""
                 <!DOCTYPE html>
                 <html>
@@ -232,11 +164,11 @@ class HealthHandler(BaseHTTPRequestHandler):
                     <meta name="viewport" content="width=device-width, initial-scale=1.0">
                     <title>{file_data['file_name']}</title>
                     <style>
-                        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+                        * {{ margin: 0; padding: 0; }}
                         body {{
                             background: #0a0a0a;
                             color: #fff;
-                            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+                            font-family: Arial, sans-serif;
                             min-height: 100vh;
                             display: flex;
                             justify-content: center;
@@ -249,7 +181,6 @@ class HealthHandler(BaseHTTPRequestHandler):
                             background: #1a1a1a;
                             border-radius: 16px;
                             padding: 20px;
-                            box-shadow: 0 20px 60px rgba(0,0,0,0.8);
                         }}
                         .video-wrapper {{
                             background: #000;
@@ -265,66 +196,21 @@ class HealthHandler(BaseHTTPRequestHandler):
                             padding: 20px 10px 10px 10px;
                         }}
                         .info h2 {{
-                            font-size: 1.2em;
-                            margin-bottom: 10px;
                             color: #00ff88;
-                            word-break: break-all;
-                        }}
-                        .info p {{
-                            color: #888;
-                            font-size: 0.9em;
-                            margin: 5px 0;
-                        }}
-                        .actions {{
-                            display: flex;
-                            gap: 12px;
-                            margin-top: 15px;
-                            flex-wrap: wrap;
+                            margin-bottom: 10px;
                         }}
                         .btn {{
                             display: inline-block;
                             padding: 10px 24px;
+                            background: #00ff88;
+                            color: #000;
                             border-radius: 8px;
                             text-decoration: none;
                             font-weight: bold;
-                            transition: all 0.3s;
-                            border: none;
-                            cursor: pointer;
-                            font-size: 0.95em;
-                        }}
-                        .btn-primary {{
-                            background: #00ff88;
-                            color: #000;
-                        }}
-                        .btn-primary:hover {{
-                            background: #00cc77;
-                            transform: translateY(-2px);
-                        }}
-                        .btn-secondary {{
-                            background: #333;
-                            color: #fff;
-                        }}
-                        .btn-secondary:hover {{
-                            background: #444;
-                            transform: translateY(-2px);
-                        }}
-                        .badge {{
-                            display: inline-block;
-                            background: #00ff8833;
-                            color: #00ff88;
-                            padding: 4px 12px;
-                            border-radius: 20px;
-                            font-size: 0.8em;
-                            margin-top: 10px;
-                        }}
-                        .file-type-icon {{
-                            font-size: 2em;
                             margin-right: 10px;
                         }}
-                        @media (max-width: 600px) {{
-                            .container {{ padding: 10px; }}
-                            .actions {{ flex-direction: column; }}
-                            .btn {{ text-align: center; }}
+                        .btn:hover {{
+                            background: #00cc77;
                         }}
                     </style>
                 </head>
@@ -332,18 +218,17 @@ class HealthHandler(BaseHTTPRequestHandler):
                     <div class="container">
                         <div class="video-wrapper">
                             <video controls autoplay>
-                                <source src="/download/{file_code}" type="{file_data['mime_type']}">
+                                <source src="/stream/{file_code}" type="{file_data['mime_type']}">
                                 Your browser doesn't support video playback.
                             </video>
                         </div>
                         <div class="info">
-                            <h2><span class="file-type-icon">{file_icon}</span> {file_data['file_name']}</h2>
-                            <p>📦 Size: {human_size(file_data['file_size'])}</p>
-                            <p>📂 Type: {file_data.get('file_type', 'other').upper()}</p>
-                            <span class="badge">👁️ {file_data.get('views', 0)} views</span>
-                            <div class="actions">
-                                <a href="/download/{file_code}" class="btn btn-primary">📥 Download</a>
-                                <a href="https://t.me/{BOT_USERNAME}" class="btn btn-secondary">🤖 Telegram Bot</a>
+                            <h2>{file_data['file_name']}</h2>
+                            <p>Size: {human_size(file_data['file_size'])}</p>
+                            <p>Type: {file_data['file_type'].upper()}</p>
+                            <div style="margin-top: 15px;">
+                                <a href="/download/{file_code}" class="btn">Download</a>
+                                <a href="https://t.me/{BOT_USERNAME}" class="btn" style="background:#333;color:#fff;">Bot</a>
                             </div>
                         </div>
                     </div>
@@ -351,86 +236,50 @@ class HealthHandler(BaseHTTPRequestHandler):
                 </html>
                 """
                 self.send_response(200)
-                self.send_header('Content-Type', 'text/html; charset=utf-8')
                 self.end_headers()
                 self.wfile.write(html.encode('utf-8'))
             else:
                 self.send_response(404)
                 self.end_headers()
                 self.wfile.write(b"File not found")
-
+                
         elif self.path.startswith("/download/"):
             file_code = self.path.split("/")[-1]
-            file_data = self._get_file_data(file_code)
-
+            file_data = get_file_by_code(file_code)
             if file_data:
-                self._increment_downloads(file_code)
-                file_id = file_data['file_id']
-
-                # Get the correct file URL from Telegram
-                file_url = get_telegram_file_url(file_id)
-
-                if file_url:
-                    # Redirect to the actual file
-                    self.send_response(302)
-                    self.send_header('Location', file_url)
-                    self.end_headers()
-                else:
-                    self.send_response(404)
-                    self.end_headers()
-                    self.wfile.write(b"File not available on Telegram")
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(f"Download: {file_data['file_name']}".encode('utf-8'))
             else:
                 self.send_response(404)
                 self.end_headers()
                 self.wfile.write(b"File not found")
+                
+        elif self.path.startswith("/stream/"):
+            file_code = self.path.split("/")[-1]
+            file_data = get_file_by_code(file_code)
+            if file_data and file_data.get('file_path') and os.path.exists(file_data['file_path']):
+                self.send_response(200)
+                self.send_header('Content-Type', file_data['mime_type'])
+                self.send_header('Content-Disposition', f'inline; filename="{file_data["file_name"]}"')
+                self.end_headers()
+                with open(file_data['file_path'], 'rb') as f:
+                    self.wfile.write(f.read())
+            else:
+                self.send_response(404)
+                self.end_headers()
+                self.wfile.write(b"File not available")
         else:
             self.send_response(404)
             self.end_headers()
             self.wfile.write(b"Not found")
-
-    def _get_file_data(self, file_code):
-        import asyncio
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                return loop.run_until_complete(db.get_file(file_code))
-            finally:
-                loop.close()
-        except Exception as e:
-            logger.error(f"_get_file_data error for {file_code}: {e}")
-            return None
-
-    def _increment_views(self, file_code):
-        import asyncio
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                loop.run_until_complete(db.increment_views(file_code))
-            finally:
-                loop.close()
-        except Exception as e:
-            logger.error(f"_increment_views error for {file_code}: {e}")
-
-    def _increment_downloads(self, file_code):
-        import asyncio
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                loop.run_until_complete(db.increment_downloads(file_code))
-            finally:
-                loop.close()
-        except Exception as e:
-            logger.error(f"_increment_downloads error for {file_code}: {e}")
 
     def log_message(self, format, *args):
         pass
 
 def run_health_server():
     server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
-    logger.info(f"🌐 Health server running on 0.0.0.0:{PORT}")
+    logger.info(f"🌐 Web server running on 0.0.0.0:{PORT}")
     logger.info(f"🔗 Base URL: {BASE_URL}")
     server.serve_forever()
 
@@ -440,20 +289,21 @@ def run_health_server():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    await db.add_user(user)
-
+    add_user(user)
+    
     await update.message.reply_text(
-        f"👋 **Hello {user.first_name}!**\n\n"
+        f"👋 Hello {user.first_name}!\n\n"
         f"🎬 **Telegram Streaming Bot**\n\n"
         f"Send me any file and I'll generate a streaming link!\n\n"
         f"**Supported files:**\n"
-        f"• 🎬 Videos (MP4, MKV, AVI, MOV)\n"
-        f"• 📄 Documents (PDF, DOC, TXT)\n"
-        f"• 🎵 Audio (MP3, WAV)\n"
-        f"• 🖼️ Photos\n\n"
+        f"• Videos (MP4, MKV, AVI, MOV)\n"
+        f"• Documents (PDF, DOC, TXT)\n"
+        f"• Audio (MP3, WAV)\n"
+        f"• Photos\n\n"
         f"**Commands:**\n"
         f"/start - Start bot\n"
-        f"/help - Get help",
+        f"/help - Get help\n"
+        f"/stats - Statistics (Owner only)",
         parse_mode='Markdown'
     )
 
@@ -465,13 +315,32 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "2️⃣ I'll generate a streaming link\n"
         "3️⃣ Share the link with anyone!\n\n"
         "**Supported formats:**\n"
-        "✅ Videos: MP4, MKV, AVI, MOV\n"
-        "✅ Documents: PDF, DOC, TXT\n"
-        "✅ Audio: MP3, WAV\n"
-        "✅ Photos: JPG, PNG\n\n"
+        "✅ Videos: MP4, MKV, AVI, MOV, WEBM\n"
+        "✅ Documents: PDF, DOC, DOCX, TXT\n"
+        "✅ Audio: MP3, WAV, FLAC\n"
+        "✅ Photos: JPG, PNG, GIF\n\n"
         "**Commands:**\n"
         "/start - Start the bot\n"
-        "/help - Show this help",
+        "/help - Show this help\n"
+        "/stats - View statistics",
+        parse_mode='Markdown'
+    )
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != OWNER_ID and OWNER_ID != 0:
+        await update.message.reply_text("❌ Unauthorized")
+        return
+    
+    users = total_users()
+    files = total_files()
+    
+    await update.message.reply_text(
+        f"📊 **Bot Statistics**\n\n"
+        f"👤 Users: {users}\n"
+        f"📁 Files: {files}\n"
+        f"🤖 Status: Online ✅\n"
+        f"🔗 Base URL: {BASE_URL}",
         parse_mode='Markdown'
     )
 
@@ -480,11 +349,20 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle document/file upload"""
     try:
         user = update.effective_user
         document = update.message.document
         file_name = document.file_name or "document"
-
+        
+        os.makedirs("downloads", exist_ok=True)
+        
+        file_code = generate_file_code()
+        file_path = f"downloads/{file_code}_{file_name}"
+        
+        file = await context.bot.get_file(document.file_id)
+        await file.download_to_drive(file_path)
+        
         mime_type = document.mime_type or "application/octet-stream"
         file_type = "document"
         if mime_type.startswith("video/"):
@@ -493,182 +371,197 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             file_type = "audio"
         elif mime_type.startswith("image/"):
             file_type = "photo"
-
-        file_code = generate_file_code()
-
-        saved = await db.save_file(
-            file_code,
-            document.file_id,
-            document.file_unique_id,
-            file_name,
-            document.file_size,
-            mime_type,
-            file_type
-        )
-
-        if not saved:
-            await update.message.reply_text("❌ Failed to save file — database not connected.")
-            return
-
+        
+        save_file(file_code, document.file_id, document.file_unique_id, 
+                 file_name, document.file_size, mime_type, file_type, file_path)
+        
         watch_link = build_watch_link(file_code)
         download_link = build_download_link(file_code)
-        file_icon = get_file_icon(file_type)
-
+        
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🎬 Watch", url=watch_link)],
             [InlineKeyboardButton("📥 Download", url=download_link)]
         ])
-
-        await update.message.reply_text(
-            f"{file_icon} **File Received!**\n\n"
+        
+        response = (
+            f"✅ **File received and saved!**\n\n"
             f"📄 **Name:** `{file_name}`\n"
             f"📦 **Size:** {human_size(document.file_size)}\n"
+            f"📂 **Type:** {file_type.upper()}\n"
             f"🔑 **Code:** `{file_code}`\n\n"
-            f"🔗 **Watch:** {watch_link}\n"
-            f"📥 **Download:** {download_link}",
-            reply_markup=keyboard,
-            parse_mode='Markdown'
+            f"🔗 **Share these links:**\n"
+            f"🎬 **Watch:** {watch_link}\n"
+            f"📥 **Download:** {download_link}"
         )
-        logger.info(f"✅ File processed: {file_code}")
-
+        
+        await update.message.reply_text(response, reply_markup=keyboard, parse_mode='Markdown')
+        
+        if LOG_CHANNEL:
+            try:
+                await context.bot.send_message(
+                    LOG_CHANNEL,
+                    f"📁 **New File Uploaded**\n\n"
+                    f"👤 User: {user.first_name} (@{user.username or 'N/A'})\n"
+                    f"🆔 ID: {user.id}\n"
+                    f"📄 File: {file_name}\n"
+                    f"📦 Size: {human_size(document.file_size)}\n"
+                    f"🔑 Code: `{file_code}`\n"
+                    f"🔗 Link: {watch_link}",
+                    parse_mode='Markdown'
+                )
+            except Exception as e:
+                logger.error(f"Log channel error: {e}")
+        
+        logger.info(f"✅ File processed: {file_code} - {file_name}")
+        
     except Exception as e:
-        logger.error(f"Document handler error: {e}")
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        user = update.effective_user
-        video = update.message.video
-        file_name = video.file_name or f"video_{video.file_unique_id}.mp4"
-
-        file_code = generate_file_code()
-
-        saved = await db.save_file(
-            file_code,
-            video.file_id,
-            video.file_unique_id,
-            file_name,
-            video.file_size,
-            video.mime_type or "video/mp4",
-            "video"
-        )
-
-        if not saved:
-            await update.message.reply_text("❌ Failed to save video — database not connected.")
-            return
-
-        watch_link = build_watch_link(file_code)
-        download_link = build_download_link(file_code)
-
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🎬 Watch", url=watch_link)],
-            [InlineKeyboardButton("📥 Download", url=download_link)]
-        ])
-
-        await update.message.reply_text(
-            f"🎬 **Video Received!**\n\n"
-            f"📄 **Name:** `{file_name}`\n"
-            f"📦 **Size:** {human_size(video.file_size)}\n"
-            f"🔑 **Code:** `{file_code}`\n\n"
-            f"🔗 **Watch:** {watch_link}",
-            reply_markup=keyboard,
-            parse_mode='Markdown'
-        )
-        logger.info(f"✅ Video processed: {file_code}")
-
-    except Exception as e:
-        logger.error(f"Video handler error: {e}")
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        user = update.effective_user
-        audio = update.message.audio
-        file_name = audio.file_name or f"audio_{audio.file_unique_id}.mp3"
-
-        file_code = generate_file_code()
-
-        saved = await db.save_file(
-            file_code,
-            audio.file_id,
-            audio.file_unique_id,
-            file_name,
-            audio.file_size,
-            audio.mime_type or "audio/mpeg",
-            "audio"
-        )
-
-        if not saved:
-            await update.message.reply_text("❌ Failed to save audio — database not connected.")
-            return
-
-        watch_link = build_watch_link(file_code)
-        download_link = build_download_link(file_code)
-
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🎵 Listen", url=watch_link)],
-            [InlineKeyboardButton("📥 Download", url=download_link)]
-        ])
-
-        await update.message.reply_text(
-            f"🎵 **Audio Received!**\n\n"
-            f"📄 **Name:** `{file_name}`\n"
-            f"📦 **Size:** {human_size(audio.file_size)}\n"
-            f"🔑 **Code:** `{file_code}`\n\n"
-            f"🔗 **Watch:** {watch_link}",
-            reply_markup=keyboard,
-            parse_mode='Markdown'
-        )
-        logger.info(f"✅ Audio processed: {file_code}")
-
-    except Exception as e:
-        logger.error(f"Audio handler error: {e}")
-        await update.message.reply_text(f"❌ Error: {str(e)}")
+        logger.error(f"Error handling document: {e}")
+        await update.message.reply_text(f"❌ Failed to process file: {str(e)}")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle photo uploads"""
     try:
-        user = update.effective_user
         photo = update.message.photo[-1]
-        file_name = f"photo_{photo.file_unique_id}.jpg"
-
+        
+        os.makedirs("downloads", exist_ok=True)
+        
         file_code = generate_file_code()
-
-        saved = await db.save_file(
-            file_code,
-            photo.file_id,
-            photo.file_unique_id,
-            file_name,
-            photo.file_size,
-            "image/jpeg",
-            "photo"
-        )
-
-        if not saved:
-            await update.message.reply_text("❌ Failed to save photo — database not connected.")
-            return
-
+        file_name = f"photo_{file_code}.jpg"
+        file_path = f"downloads/{file_name}"
+        
+        file = await context.bot.get_file(photo.file_id)
+        await file.download_to_drive(file_path)
+        
+        save_file(file_code, photo.file_id, photo.file_unique_id, 
+                 file_name, photo.file_size, "image/jpeg", "photo", file_path)
+        
         watch_link = build_watch_link(file_code)
         download_link = build_download_link(file_code)
-
+        
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🖼️ View", url=watch_link)],
             [InlineKeyboardButton("📥 Download", url=download_link)]
         ])
-
+        
         await update.message.reply_text(
-            f"🖼️ **Photo Received!**\n\n"
+            f"✅ **Photo received and saved!**\n\n"
             f"📐 **Resolution:** {photo.width}x{photo.height}\n"
             f"📦 **Size:** {human_size(photo.file_size)}\n"
             f"🔑 **Code:** `{file_code}`\n\n"
-            f"🔗 **Watch:** {watch_link}",
+            f"🔗 **Share:** {watch_link}",
             reply_markup=keyboard,
             parse_mode='Markdown'
         )
+        
         logger.info(f"✅ Photo processed: {file_code}")
-
+        
     except Exception as e:
-        logger.error(f"Photo handler error: {e}")
-        await update.message.reply_text(f"❌ Error: {str(e)}")
+        logger.error(f"Error handling photo: {e}")
+        await update.message.reply_text(f"❌ Failed to process photo: {str(e)}")
+
+async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle video uploads"""
+    try:
+        user = update.effective_user
+        video = update.message.video
+        file_name = video.file_name or f"video_{video.file_unique_id}.mp4"
+        
+        os.makedirs("downloads", exist_ok=True)
+        
+        file_code = generate_file_code()
+        file_path = f"downloads/{file_code}_{file_name}"
+        
+        file = await context.bot.get_file(video.file_id)
+        await file.download_to_drive(file_path)
+        
+        mime_type = video.mime_type or "video/mp4"
+        save_file(file_code, video.file_id, video.file_unique_id, 
+                 file_name, video.file_size, mime_type, "video", file_path)
+        
+        watch_link = build_watch_link(file_code)
+        download_link = build_download_link(file_code)
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎬 Watch", url=watch_link)],
+            [InlineKeyboardButton("📥 Download", url=download_link)]
+        ])
+        
+        await update.message.reply_text(
+            f"✅ **Video received and saved!**\n\n"
+            f"📄 **Name:** `{file_name}`\n"
+            f"📦 **Size:** {human_size(video.file_size)}\n"
+            f"📐 **Resolution:** {video.width}x{video.height}\n"
+            f"⏱️ **Duration:** {video.duration}s\n"
+            f"🔑 **Code:** `{file_code}`\n\n"
+            f"🔗 **Share:** {watch_link}",
+            reply_markup=keyboard,
+            parse_mode='Markdown'
+        )
+        
+        if LOG_CHANNEL:
+            try:
+                await context.bot.send_message(
+                    LOG_CHANNEL,
+                    f"🎬 **New Video Uploaded**\n\n"
+                    f"👤 User: {user.first_name} (@{user.username or 'N/A'})\n"
+                    f"🆔 ID: {user.id}\n"
+                    f"📄 File: {file_name}\n"
+                    f"📦 Size: {human_size(video.file_size)}\n"
+                    f"🔑 Code: `{file_code}`\n"
+                    f"🔗 Link: {watch_link}",
+                    parse_mode='Markdown'
+                )
+            except Exception as e:
+                logger.error(f"Log channel error: {e}")
+        
+        logger.info(f"✅ Video processed: {file_code}")
+        
+    except Exception as e:
+        logger.error(f"Error handling video: {e}")
+        await update.message.reply_text(f"❌ Failed to process video: {str(e)}")
+
+async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle audio uploads"""
+    try:
+        audio = update.message.audio
+        file_name = audio.file_name or f"audio_{audio.file_unique_id}.mp3"
+        
+        os.makedirs("downloads", exist_ok=True)
+        
+        file_code = generate_file_code()
+        file_path = f"downloads/{file_code}_{file_name}"
+        
+        file = await context.bot.get_file(audio.file_id)
+        await file.download_to_drive(file_path)
+        
+        mime_type = audio.mime_type or "audio/mpeg"
+        save_file(file_code, audio.file_id, audio.file_unique_id, 
+                 file_name, audio.file_size, mime_type, "audio", file_path)
+        
+        watch_link = build_watch_link(file_code)
+        download_link = build_download_link(file_code)
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎵 Listen", url=watch_link)],
+            [InlineKeyboardButton("📥 Download", url=download_link)]
+        ])
+        
+        await update.message.reply_text(
+            f"✅ **Audio received and saved!**\n\n"
+            f"📄 **Name:** `{file_name}`\n"
+            f"📦 **Size:** {human_size(audio.file_size)}\n"
+            f"⏱️ **Duration:** {audio.duration}s\n"
+            f"🔑 **Code:** `{file_code}`\n\n"
+            f"🔗 **Share:** {watch_link}",
+            reply_markup=keyboard,
+            parse_mode='Markdown'
+        )
+        
+        logger.info(f"✅ Audio processed: {file_code}")
+        
+    except Exception as e:
+        logger.error(f"Error handling audio: {e}")
+        await update.message.reply_text(f"❌ Failed to process audio: {str(e)}")
 
 # ============================================================
 # ERROR HANDLER
@@ -682,26 +575,32 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 
 def main():
+    # Start health server in the background
     threading.Thread(target=run_health_server, daemon=True).start()
 
     app = Application.builder().token(BOT_TOKEN).build()
-
+    
+    # Command handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
-
+    app.add_handler(CommandHandler("stats", stats_command))
+    
+    # File handlers (Order matters - specific first)
     app.add_handler(MessageHandler(filters.VIDEO, handle_video))
     app.add_handler(MessageHandler(filters.AUDIO, handle_audio))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-
+    
+    # Error handler
     app.add_error_handler(error_handler)
 
     logger.info("=" * 50)
     logger.info("🤖 Bot is running...")
     logger.info(f"📛 Username: @{BOT_USERNAME}")
     logger.info(f"🔗 Base URL: {BASE_URL}")
+    logger.info(f"📁 Send me any file to get a streaming link!")
     logger.info("=" * 50)
-
+    
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
