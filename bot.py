@@ -45,12 +45,12 @@ app = Client(
     workers=4
 )
 
-# ---------- SIMPLE START COMMAND ----------
+# ---------- START COMMAND ----------
 @app.on_message(filters.command("start") & filters.private)
 async def start_command(client: Client, message: Message):
     try:
         user = message.from_user
-        logger.info(f"📩 START from {user.id} - {user.first_name}")
+        logger.info(f"📩 START from {user.id}")
         
         await message.reply_text(
             f"👋 **Hello {user.first_name}!**\n\n"
@@ -58,15 +58,13 @@ async def start_command(client: Client, message: Message):
             f"Send me any file and I'll generate a streaming link!\n\n"
             f"**Commands:**\n"
             f"/start - Start bot\n"
-            f"/help - Get help\n"
-            f"/ping - Check if bot is alive"
+            f"/help - Get help"
         )
-        logger.info(f"✅ Start response sent to {user.id}")
+        logger.info(f"✅ Start response sent")
     except Exception as e:
         logger.error(f"❌ Start error: {e}")
-        await message.reply_text(f"❌ Error: {str(e)}")
 
-# ---------- SIMPLE HELP COMMAND ----------
+# ---------- HELP COMMAND ----------
 @app.on_message(filters.command("help") & filters.private)
 async def help_command(client: Client, message: Message):
     try:
@@ -80,11 +78,6 @@ async def help_command(client: Client, message: Message):
     except Exception as e:
         logger.error(f"❌ Help error: {e}")
 
-# ---------- SIMPLE PING COMMAND ----------
-@app.on_message(filters.command("ping") & filters.private)
-async def ping_command(client: Client, message: Message):
-    await message.reply_text("🏓 Pong! Bot is alive!")
-
 # ---------- FILE HANDLER ----------
 @app.on_message(filters.private & (filters.video | filters.document | filters.audio | filters.photo))
 async def handle_file(client: Client, message: Message):
@@ -92,7 +85,6 @@ async def handle_file(client: Client, message: Message):
         user = message.from_user
         logger.info(f"📁 File from {user.id}")
         
-        # Send initial message
         msg = await message.reply_text("⏳ Processing...")
         
         # Detect file type
@@ -125,7 +117,6 @@ async def handle_file(client: Client, message: Message):
         watch_link = f"{BASE_URL}/watch/{file_code}"
         download_link = f"{BASE_URL}/download/{file_code}"
         
-        # Send response
         response = f"""
 ✅ **File Received!**
 
@@ -144,14 +135,15 @@ async def handle_file(client: Client, message: Message):
         logger.error(f"❌ File error: {e}")
         await message.reply_text(f"❌ Error: {str(e)}")
 
-# ---------- CATCH-ALL HANDLER ----------
-@app.on_message(filters.private & ~filters.command(["start", "help", "ping"]))
-async def echo(client: Client, message: Message):
-    """Echo any message to test if bot is responding"""
-    await message.reply_text(f"📩 I received: {message.text or 'a message'}\n\nSend me a file or use /help")
+# ---------- TEST HANDLER - ECHO ANY MESSAGE ----------
+@app.on_message(filters.private & filters.text & ~filters.command(["start", "help"]))
+async def echo_message(client: Client, message: Message):
+    """Echo any text message to confirm bot is working"""
+    logger.info(f"📩 Text from {message.from_user.id}: {message.text}")
+    await message.reply_text(f"📩 I received: '{message.text}'\n\nSend me a file or use /help")
 
 # ============================================================
-# WEB SERVER (SIMPLE)
+# WEB SERVER
 # ============================================================
 
 routes = web.RouteTableDef()
@@ -180,7 +172,7 @@ async def start_web():
     logger.info(f"🌐 Web: http://0.0.0.0:{PORT}")
 
 # ============================================================
-# MAIN
+# MAIN - FIXED
 # ============================================================
 
 async def main():
@@ -205,12 +197,24 @@ async def main():
         print("📬 Send /start in Telegram")
         print("=" * 60)
         
-        # Keep running
-        await asyncio.Event().wait()
+        # ⭐ IMPORTANT: Keep the bot running with idle()
+        logger.info("🔄 Starting idle loop...")
+        await app.idle()
         
     except Exception as e:
         print(f"❌ Error: {e}")
         logger.error(f"Error: {e}", exc_info=True)
+    
+    finally:
+        # Clean shutdown
+        await app.stop()
+        logger.info("👋 Bot stopped")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n👋 Bot stopped by user")
+    except Exception as e:
+        print(f"❌ Fatal error: {e}")
+        logger.error(f"Fatal error: {e}", exc_info=True)
